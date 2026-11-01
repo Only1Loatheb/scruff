@@ -163,6 +163,9 @@ impl<'t> Formatter<'t> {
             // in scalafmt's `indent.callSite` and `indent.defnSite`.
             SyntaxKind::Arguments => self.list(node, 1),
             SyntaxKind::Parameters | SyntaxKind::ClassParameters => self.list(node, 2),
+            // Type parameters and arguments follow the same layout.
+            SyntaxKind::TypeArguments => self.list(node, 1),
+            SyntaxKind::TypeParameters => self.list(node, 2),
             SyntaxKind::InfixExpression => self.infix(node),
             SyntaxKind::Block => self.braced(node),
             SyntaxKind::CallExpression
@@ -172,9 +175,10 @@ impl<'t> Formatter<'t> {
         }
     }
 
-    /// A parenthesized list, such as arguments or parameters: on one line if
-    /// it fits, otherwise one item per line, nested `levels` deep, with `)`
-    /// on its own line (scalafmt's `danglingParentheses`).
+    /// A list in parentheses or brackets, such as arguments, parameters, or
+    /// type arguments and parameters: on one line if it fits, otherwise one
+    /// item per line, nested `levels` deep, with `)` or `]` on its own line
+    /// (scalafmt's `danglingParentheses`).
     ///
     /// Only for a list written on one line with no comments. A list over
     /// several lines keeps its line breaks until indentation is handled.
@@ -188,7 +192,7 @@ impl<'t> Formatter<'t> {
         else {
             return None;
         };
-        if open.text() != "(" || close.text() != ")" || children.len() < 3 {
+        if !matches!((open.text(), close.text()), ("(", ")") | ("[", "]")) || children.len() < 3 {
             return None;
         }
 

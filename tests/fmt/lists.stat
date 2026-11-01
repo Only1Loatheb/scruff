@@ -228,3 +228,37 @@ val a = reify { reify { x } }
 val ys = xs.flatMap { x =>
   ys.map { y => combine(x, y) }
 }
+
+<<< type parameters that don't fit, when the value parameters fit
+def sequential[Alpha, Beta, Gamma, Delta]: Unit = ()
+>>>
+def sequential[
+    Alpha,
+    Beta,
+    Gamma,
+    Delta
+]: Unit = ()
+
+<<< type parameters fit; the value parameters after them break
+def sequential[Alpha, Beta, Gamma](a: Alpha) = a
+>>>
+def sequential[Alpha, Beta, Gamma](
+    a: Alpha
+) = a
+
+<<< type arguments that don't fit
+val m: Map[ModuleIdentifier, VersionNumber] = x
+>>>
+val m: Map[
+  ModuleIdentifier,
+  VersionNumber
+] = x
+
+<<< type parameters with variance and bounds
+class Cache[+Key <: Ordered[Key], Value, Third]
+>>>
+class Cache[
+    +Key <: Ordered[Key],
+    Value,
+    Third
+]
