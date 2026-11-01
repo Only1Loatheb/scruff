@@ -235,9 +235,8 @@ mod tests {
     use super::*;
 
     fn regions(source: &str) -> Vec<(SyntaxKind, Vec<String>)> {
-        let parse = parse(source);
-        parse
-            .syntax()
+        let tree = parse(source);
+        tree.syntax()
             .descendants()
             .filter(SyntaxNode::is_indentation_region)
             .map(|region| {
@@ -316,8 +315,8 @@ mod tests {
 
     #[test]
     fn enclosing_region_skips_brace_blocks() {
-        let parse = parse("object A:\n  def f = {\n    val x = 1\n    x\n  }\n");
-        let val = parse
+        let tree = parse("object A:\n  def f = {\n    val x = 1\n    x\n  }\n");
+        let val = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::ValDefinition)
@@ -329,9 +328,8 @@ mod tests {
     }
 
     fn problems(source: &str) -> Vec<(SyntaxKind, Option<RegionProblem>)> {
-        let parse = parse(source);
-        parse
-            .syntax()
+        let tree = parse(source);
+        tree.syntax()
             .descendants()
             .filter(SyntaxNode::is_indentation_region)
             .map(|region| (region.kind(), region.region_problem()))
@@ -408,12 +406,12 @@ mod tests {
 
     #[test]
     fn end_markers_match_what_they_close() {
-        let parse = parse(concat!(
+        let tree = parse(concat!(
             "object A:\n  def h =\n    x match\n      case _ => 1\n    end match\n  end h\n",
             "  val v =\n    1\n  end v\n  var w =\n    2\n  end w\n",
             "  def extension =\n    3\n  end extension\nend A\n",
         ));
-        let markers: Vec<_> = parse
+        let markers: Vec<_> = tree
             .syntax()
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::EndMarker)
@@ -426,8 +424,8 @@ mod tests {
     fn misattached_end_marker_flags_its_region() {
         // `end g` names a different definition from the one it closes.
         let source = "object O:\n  def f =\n    1\n  end g\n";
-        let parse = parse(source);
-        let marker = parse
+        let tree = parse(source);
+        let marker = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::EndMarker)
@@ -435,7 +433,7 @@ mod tests {
         assert!(
             !marker.end_marker_matches_parent(),
             "tree-sitter changed; {:#?}",
-            parse.syntax()
+            tree.syntax()
         );
         let region = marker.enclosing_region().unwrap();
         assert_eq!(
@@ -452,8 +450,8 @@ mod tests {
 
     #[test]
     fn first_on_line_and_indentation() {
-        let parse = parse("object A:\n\t/* c */ val x = 1; val y = 2\n");
-        let token = |text: &str| parse.syntax().tokens().find(|t| t.text() == text).unwrap();
+        let tree = parse("object A:\n\t/* c */ val x = 1; val y = 2\n");
+        let token = |text: &str| tree.syntax().tokens().find(|t| t.text() == text).unwrap();
         assert!(token("object").is_first_on_line());
         assert!(
             token("val").is_first_on_line(),
@@ -461,7 +459,7 @@ mod tests {
         );
         assert!(!token("x").is_first_on_line());
         assert!(
-            !parse
+            !tree
                 .syntax()
                 .tokens()
                 .filter(|t| t.text() == "val")

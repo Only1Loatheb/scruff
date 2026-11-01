@@ -14,7 +14,7 @@
 use std::fmt;
 
 use super::{
-    NodeOrToken, Parse, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, WalkEvent,
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, Tree, WalkEvent,
     parse,
 };
 
@@ -74,7 +74,7 @@ pub fn check_equivalent(before: &str, after: &str) -> Result<(), Difference> {
     check_comments(&before, &after)
 }
 
-fn location(parse: &Parse, offset: TextSize) -> Location {
+fn location(parse: &Tree, offset: TextSize) -> Location {
     let (line, column) = parse.line_col(offset);
     Location {
         offset,
@@ -83,7 +83,7 @@ fn location(parse: &Parse, offset: TextSize) -> Location {
     }
 }
 
-fn check_errors(before: &Parse, after: &Parse) -> Result<(), Difference> {
+fn check_errors(before: &Tree, after: &Tree) -> Result<(), Difference> {
     match after.errors().first() {
         Some(error) if before.errors().is_empty() => Err(Difference {
             kind: DifferenceKind::NewSyntaxError,
@@ -187,7 +187,7 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
     }
 }
 
-fn check_code(before: &Parse, after: &Parse) -> Result<(), Difference> {
+fn check_code(before: &Tree, after: &Tree) -> Result<(), Difference> {
     let mut b = code_steps(before.syntax());
     let mut a = code_steps(after.syntax());
     loop {
@@ -236,7 +236,7 @@ impl Comment<'_> {
     }
 }
 
-fn comments(parse: &Parse) -> Vec<Comment<'_>> {
+fn comments(parse: &Tree) -> Vec<Comment<'_>> {
     let mut out = Vec::new();
     let owners = parse.syntax().tokens().filter(SyntaxToken::owns_trivia);
     for (index, token) in owners.enumerate() {
@@ -281,7 +281,7 @@ fn same_comment(a: &str, b: &str) -> bool {
     a == b || lines(a).eq(lines(b))
 }
 
-fn check_comments(before: &Parse, after: &Parse) -> Result<(), Difference> {
+fn check_comments(before: &Tree, after: &Tree) -> Result<(), Difference> {
     let b = comments(before);
     let a = comments(after);
     for i in 0..b.len().max(a.len()) {

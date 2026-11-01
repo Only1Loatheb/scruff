@@ -17,7 +17,7 @@
 use std::fmt;
 
 use super::{
-    Child, NodeId, NodeOrToken, Parse, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
+    Child, NodeId, NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Tree,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -38,7 +38,7 @@ pub(super) struct TriviaPiece {
     range: TextRange,
 }
 
-/// A range of indexes into `Parse::trivia`.
+/// A range of indexes into `Tree::trivia`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(super) struct TriviaSpan {
     start: u32,
@@ -58,7 +58,7 @@ impl TriviaSpan {
 /// One piece of whitespace or one comment.
 #[derive(Clone, Copy)]
 pub struct SyntaxTrivia<'t> {
-    tree: &'t Parse,
+    tree: &'t Tree,
     piece: &'t TriviaPiece,
 }
 
@@ -108,7 +108,7 @@ impl fmt::Display for SyntaxTrivia<'_> {
     }
 }
 
-impl Parse {
+impl Tree {
     fn trivia_in(
         &self,
         span: TriviaSpan,
@@ -264,7 +264,7 @@ enum Item {
 
 /// Splits the file into code tokens and trivia pieces, then gives each run of
 /// trivia between two code tokens to its owners. Called once while parsing.
-pub(super) fn attach(parse: &mut Parse) {
+pub(super) fn attach(parse: &mut Tree) {
     let items = lex(parse.syntax());
 
     let mut trivia = Vec::new();
@@ -412,7 +412,7 @@ fn offset(n: usize) -> TextSize {
 }
 
 #[cfg(test)]
-pub(super) fn reassemble(parse: &Parse) -> String {
+pub(super) fn reassemble(parse: &Tree) -> String {
     let mut out = String::new();
     for token in parse.syntax().tokens().filter(SyntaxToken::owns_trivia) {
         out.extend(token.leading_trivia().map(|t| t.text()));
@@ -428,7 +428,7 @@ mod tests {
     use super::super::parse;
     use super::*;
 
-    fn token<'t>(parse: &'t Parse, text: &str) -> SyntaxToken<'t> {
+    fn token<'t>(parse: &'t Tree, text: &str) -> SyntaxToken<'t> {
         let mut matches = parse
             .syntax()
             .tokens()
@@ -455,16 +455,16 @@ mod tests {
 
     #[test]
     fn same_line_comment_trails_previous_token() {
-        let parse = parse(PARAMS);
-        assert_eq!(comments(token(&parse, ",").trailing_trivia()), ["// first"]);
-        let b = parse.syntax().tokens().find(|t| t.text() == "b").unwrap();
+        let tree = parse(PARAMS);
+        assert_eq!(comments(token(&tree, ",").trailing_trivia()), ["// first"]);
+        let b = tree.syntax().tokens().find(|t| t.text() == "b").unwrap();
         assert!(comments(b.leading_trivia()).is_empty());
     }
 
     #[test]
     fn own_line_comment_leads_next_token() {
-        let parse = parse(PARAMS);
-        let last_b = parse
+        let tree = parse(PARAMS);
+        let last_b = tree
             .syntax()
             .tokens()
             .filter(|t| t.text() == "b")
@@ -481,43 +481,40 @@ mod tests {
                 TriviaKind::Whitespace
             ]
         );
-        assert!(comments(token(&parse, "+").trailing_trivia()).is_empty());
+        assert!(comments(token(&tree, "+").trailing_trivia()).is_empty());
     }
 
     #[test]
     fn block_comment_on_same_line_trails() {
-        let parse = parse("val x = a /* why */ + b");
-        assert_eq!(
-            comments(token(&parse, "a").trailing_trivia()),
-            ["/* why */"]
-        );
+        let tree = parse("val x = a /* why */ + b");
+        assert_eq!(comments(token(&tree, "a").trailing_trivia()), ["/* why */"]);
     }
 
     #[test]
     fn file_start_and_end() {
-        let parse = parse("// header\n\nobject A // same line\n// footer\n");
+        let tree = parse("// header\n\nobject A // same line\n// footer\n");
         assert_eq!(
-            comments(token(&parse, "object").leading_trivia()),
+            comments(token(&tree, "object").leading_trivia()),
             ["// header"]
         );
         assert_eq!(
-            comments(token(&parse, "A").trailing_trivia()),
+            comments(token(&tree, "A").trailing_trivia()),
             ["// same line"]
         );
-        assert_eq!(comments(parse.eof_trivia()), ["// footer"]);
+        assert_eq!(comments(tree.eof_trivia()), ["// footer"]);
     }
 
     #[test]
     fn file_without_code_is_all_eof_trivia() {
-        let parse = parse("// only\n/* comments */\n");
-        assert_eq!(comments(parse.eof_trivia()), ["// only", "/* comments */"]);
-        assert_eq!(reassemble(&parse), parse.syntax().text());
+        let tree = parse("// only\n/* comments */\n");
+        assert_eq!(comments(tree.eof_trivia()), ["// only", "/* comments */"]);
+        assert_eq!(reassemble(&tree), tree.syntax().text());
     }
 
     #[test]
     fn blank_lines_are_countable() {
-        let parse = parse("val a = 1\n\n\nval b = 2");
-        let newlines = token(&parse, "b")
+        let tree = parse("val a = 1\n\n\nval b = 2");
+        let newlines = token(&tree, "b")
             .parent()
             .unwrap()
             .leading_trivia()
@@ -528,8 +525,8 @@ mod tests {
 
     #[test]
     fn doc_comment_leads_definition() {
-        let parse = parse("/** Docs. */\n@deprecated\nclass A /* not docs */");
-        let class = parse.syntax().children().next().unwrap();
+        let tree = parse("/** Docs. */\n@deprecated\nclass A /* not docs */");
+        let class = tree.syntax().children().next().unwrap();
         let docs: Vec<_> = class
             .leading_trivia()
             .filter(SyntaxTrivia::is_doc_comment)
@@ -541,8 +538,8 @@ mod tests {
 
     #[test]
     fn node_trailing_trivia_skips_trailing_whitespace_tokens() {
-        let parse = parse("object A:\n  val x = 1 // note\n");
-        let val = parse
+        let tree = parse("object A:\n  val x = 1 // note\n");
+        let val = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::ValDefinition)
@@ -553,9 +550,9 @@ mod tests {
     #[test]
     fn error_recovery_code_is_not_a_comment() {
         // tree-sitter flags the ERROR node holding `=\n}` as "extra".
-        let parse = parse("object A {\n  def f: Int =\n}\nobject B\n");
-        assert!(!parse.errors().is_empty());
-        let comments: Vec<_> = parse
+        let tree = parse("object A {\n  def f: Int =\n}\nobject B\n");
+        assert!(!tree.errors().is_empty());
+        let comments: Vec<_> = tree
             .syntax()
             .tokens()
             .flat_map(|t| t.leading_trivia().chain(t.trailing_trivia()))
@@ -563,8 +560,7 @@ mod tests {
             .collect();
         assert!(comments.is_empty(), "{comments:?}");
         assert!(
-            parse
-                .syntax()
+            tree.syntax()
                 .tokens()
                 .any(|t| t.text() == "}" && !t.is_trivia())
         );
@@ -574,8 +570,8 @@ mod tests {
     fn spaces_tree_sitter_puts_in_a_comment_are_split_off() {
         // tree-sitter-scala parses the second comment as "/*c*/ ".
         let source = "class A {\n  /*c*/ def a = x\n  /*c*/ def b = x\n}\n";
-        let parse = parse(source);
-        let in_tree: Vec<_> = parse
+        let tree = parse(source);
+        let in_tree: Vec<_> = tree
             .syntax()
             .tokens()
             .filter(|t| t.kind() == SyntaxKind::BlockComment)
@@ -586,7 +582,7 @@ mod tests {
             ["/*c*/", "/*c*/ "],
             "tree-sitter changed; this test may be moot"
         );
-        let defs: Vec<_> = parse
+        let defs: Vec<_> = tree
             .syntax()
             .descendants()
             .filter(|n| n.kind() == SyntaxKind::FunctionDefinition)
@@ -596,22 +592,22 @@ mod tests {
             let last = def.leading_trivia().last().unwrap();
             assert_eq!(last.kind(), TriviaKind::Whitespace);
         }
-        assert_eq!(reassemble(&parse), source);
+        assert_eq!(reassemble(&tree), source);
     }
 
     #[test]
     fn using_directive_comment_is_one_piece() {
-        let parse = parse("//> using scala 3.5\nobject A\n");
+        let tree = parse("//> using scala 3.5\nobject A\n");
         assert_eq!(
-            comments(token(&parse, "object").leading_trivia()),
+            comments(token(&tree, "object").leading_trivia()),
             ["//> using scala 3.5"]
         );
     }
 
     #[test]
     fn crlf_is_one_newline() {
-        let parse = parse("val a = 1\r\nval b = 2\r\n");
-        let mut vals = parse.syntax().tokens().filter(|t| t.text() == "val");
+        let tree = parse("val a = 1\r\nval b = 2\r\n");
+        let mut vals = tree.syntax().tokens().filter(|t| t.text() == "val");
         assert_eq!(vals.next().unwrap().leading_trivia().len(), 0);
         let second_val = vals.next().unwrap();
         let texts: Vec<_> = second_val.leading_trivia().map(|t| t.text()).collect();
@@ -620,25 +616,25 @@ mod tests {
 
     #[test]
     fn missing_tokens_own_nothing() {
-        let parse = parse("object A {\n  val x = 1 // c\n");
-        for token in parse.syntax().tokens().filter(SyntaxToken::is_missing) {
+        let tree = parse("object A {\n  val x = 1 // c\n");
+        for token in tree.syntax().tokens().filter(SyntaxToken::is_missing) {
             assert_eq!(
                 token.leading_trivia().len() + token.trailing_trivia().len(),
                 0
             );
         }
-        assert_eq!(comments(token(&parse, "1").trailing_trivia()), ["// c"]);
+        assert_eq!(comments(token(&tree, "1").trailing_trivia()), ["// c"]);
     }
 
     #[test]
     fn next_and_prev_token_visit_every_token() {
-        let parse = parse("class A { def f(x: Int) = x /* c */ }\n");
-        let all: Vec<_> = parse.syntax().tokens().collect();
+        let tree = parse("class A { def f(x: Int) = x /* c */ }\n");
+        let all: Vec<_> = tree.syntax().tokens().collect();
         let forward: Vec<_> =
-            std::iter::successors(parse.syntax().first_token(), SyntaxToken::next_token).collect();
+            std::iter::successors(tree.syntax().first_token(), SyntaxToken::next_token).collect();
         assert_eq!(forward, all);
         let mut backward: Vec<_> =
-            std::iter::successors(parse.syntax().last_token(), SyntaxToken::prev_token).collect();
+            std::iter::successors(tree.syntax().last_token(), SyntaxToken::prev_token).collect();
         backward.reverse();
         assert_eq!(backward, all);
     }

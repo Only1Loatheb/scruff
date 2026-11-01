@@ -5,8 +5,8 @@ mod spacing;
 
 use crate::doc::{Doc, PrintOptions, print};
 use crate::lossless_tree::{
-    Difference, NodeOrToken, Parse, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode,
-    SyntaxToken, SyntaxTrivia, TextRange, TextSize, TriviaKind, VerbatimRange, VerbatimReason,
+    Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
+    SyntaxTrivia, TextRange, TextSize, Tree, TriviaKind, VerbatimRange, VerbatimReason,
     check_equivalent, parse,
 };
 
@@ -98,20 +98,20 @@ fn format_with(
     rules: Rules,
     style: Style,
 ) -> Result<String, FormatError> {
-    let parse = parse(source);
-    if !parse.errors().is_empty() {
-        return Err(FormatError::SyntaxErrors(parse.errors().to_vec()));
+    let tree = parse(source);
+    if !tree.errors().is_empty() {
+        return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
     }
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let reindent = indent::Reindent::new(&parse);
+    let reindent = indent::Reindent::new(&tree);
     let reindented = !reindent.is_empty();
     let width = options.max_width;
     let formatted = print(
-        &build_doc(&parse, rules, style, width, reindent),
+        &build_doc(&tree, rules, style, width, reindent),
         &print_options,
     );
     match check_equivalent(source, &formatted) {
@@ -120,7 +120,7 @@ fn format_with(
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&parse, rules, style, width, indent::Reindent::default());
+            let doc = build_doc(&tree, rules, style, width, indent::Reindent::default());
             let formatted = print(&doc, &print_options);
             check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
             Ok(formatted)
@@ -130,29 +130,29 @@ fn format_with(
 }
 
 /// The document for a parsed file, before printing.
-pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
+pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
     build_doc(
-        parse,
+        tree,
         Rules::Structural,
         STYLE,
         FormatOptions::default().max_width,
-        indent::Reindent::new(parse),
+        indent::Reindent::new(tree),
     )
 }
 
 fn build_doc<'t>(
-    parse: &'t Parse,
+    tree: &'t Tree,
     rules: Rules,
     style: Style,
     max_width: usize,
     reindent: indent::Reindent,
 ) -> Doc<'t> {
     let mut formatter = Formatter {
-        parse,
+        tree,
         rules,
         max_width,
-        text: parse.syntax().text(),
-        verbatim: parse.verbatim_ranges(),
+        text: tree.syntax().text(),
+        verbatim: tree.verbatim_ranges(),
         next_verbatim: 0,
         copied_until: TextSize::from(0),
         leading_done: None,
@@ -162,10 +162,10 @@ fn build_doc<'t>(
         line_breaks: 0,
         style,
     };
-    let body = formatter.node(parse.syntax());
+    let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
-    let mut eof: Vec<_> = parse.eof_trivia().collect();
+    let mut eof: Vec<_> = tree.eof_trivia().collect();
     while eof.last().is_some_and(|t| {
         matches!(t.kind(), TriviaKind::Newline | TriviaKind::Whitespace)
             && formatter.is_free(t.text_range().start())
@@ -189,7 +189,7 @@ fn build_doc<'t>(
 /// Builds a [`Doc`] from the tree, copying verbatim ranges as they're
 /// reached.
 struct Formatter<'t> {
-    parse: &'t Parse,
+    tree: &'t Tree,
     rules: Rules,
     /// The printer's width, for layout decided here, such as alignment.
     max_width: usize,
@@ -953,13 +953,13 @@ impl<'t> Formatter<'t> {
     /// Whether the source at `offset` may be changed: it's not in a verbatim
     /// range.
     fn is_free(&self, offset: TextSize) -> bool {
-        self.parse.verbatim_at(offset).is_none()
+        self.tree.verbatim_at(offset).is_none()
     }
 
     /// Whether no verbatim range overlaps `gap`. An empty gap right before a
     /// range, as in `f(` before `"x"`, is outside it.
     fn gap_is_free(&self, gap: TextRange) -> bool {
-        self.parse
+        self.tree
             .verbatim_at(gap.start())
             .is_none_or(|v| v.range.start() >= gap.end())
     }

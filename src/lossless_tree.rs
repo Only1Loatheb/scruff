@@ -63,7 +63,7 @@ struct TokenData {
 // Parsing.
 
 /// The result of parsing: the tree plus any syntax errors.
-pub struct Parse {
+pub struct Tree {
     text: String,
     nodes: Vec<NodeData>,
     errors: Vec<SyntaxError>,
@@ -75,7 +75,7 @@ pub struct Parse {
 /// Parses Scala source. Never fails: errors are recorded in the tree.
 ///
 /// Panics if `text` is 4 GiB or larger, since offsets are `u32`.
-pub fn parse(text: &str) -> Parse {
+pub fn parse(text: &str) -> Tree {
     assert!(
         TextSize::try_from(text.len()).is_ok(),
         "source must be under 4 GiB"
@@ -89,7 +89,7 @@ pub fn parse(text: &str) -> Parse {
     build(text.to_string(), &ts_tree)
 }
 
-impl Parse {
+impl Tree {
     /// The root node.
     pub fn syntax(&self) -> SyntaxNode<'_> {
         SyntaxNode { tree: self, id: 0 }
@@ -214,10 +214,10 @@ impl<N, T> NodeOrToken<N, T> {
 
 pub type SyntaxElement<'t> = NodeOrToken<SyntaxNode<'t>, SyntaxToken<'t>>;
 
-/// An interior node of the tree. Cheap to copy; borrows the [`Parse`].
+/// An interior node of the tree. Cheap to copy; borrows the [`Tree`].
 #[derive(Clone, Copy)]
 pub struct SyntaxNode<'t> {
-    tree: &'t Parse,
+    tree: &'t Tree,
     id: NodeId,
 }
 
@@ -420,7 +420,7 @@ impl fmt::Display for SyntaxNode<'_> {
 /// or whitespace.
 #[derive(Clone, Copy)]
 pub struct SyntaxToken<'t> {
-    tree: &'t Parse,
+    tree: &'t Tree,
     parent: NodeId,
     index: usize,
 }
@@ -813,7 +813,7 @@ fn field_name(id: std::num::NonZeroU16) -> Option<&'static str> {
     language().field_name_for_id(id.get())
 }
 
-fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
+fn build(text: String, ts_tree: &tree_sitter::Tree) -> Tree {
     let ts_root = ts_tree.root_node();
     let mut b = TreeBuilder {
         text: &text,
@@ -871,7 +871,7 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
     }
 
     let nodes = b.nodes;
-    let mut parse = Parse {
+    let mut tree = Tree {
         text,
         nodes,
         errors: Vec::new(),
@@ -879,11 +879,11 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
         eof_trivia: Default::default(),
         verbatim: Default::default(),
     };
-    trivia::attach(&mut parse);
+    trivia::attach(&mut tree);
     if ts_root.has_error() {
-        parse.errors = collect_errors(parse.syntax());
+        tree.errors = collect_errors(tree.syntax());
     }
-    parse
+    tree
 }
 
 #[cfg(test)]
@@ -892,9 +892,9 @@ mod tests {
 
     /// The core guarantee: tokens cover the source exactly, in order, and
     /// every node's range matches its tokens.
-    fn assert_lossless(source: &str) -> Parse {
-        let parse = parse(source);
-        let root = parse.syntax();
+    fn assert_lossless(source: &str) -> Tree {
+        let tree = parse(source);
+        let root = tree.syntax();
         let mut pos = TextSize::from(0);
         for token in root.tokens() {
             assert_eq!(
@@ -906,20 +906,20 @@ mod tests {
         }
         assert_eq!(usize::from(pos), source.len(), "tokens stop before the end");
         assert_eq!(root.to_string(), source);
-        assert_eq!(trivia::reassemble(&parse), source, "trivia doesn't add up");
-        verbatim::assert_well_formed(&parse);
+        assert_eq!(trivia::reassemble(&tree), source, "trivia doesn't add up");
+        verbatim::assert_well_formed(&tree);
         for node in root.descendants() {
             let text: String = node.tokens().map(|t| t.text()).collect();
             assert_eq!(text, node.text(), "tokens of {node:?} don't match its text");
         }
-        parse
+        tree
     }
 
     #[test]
     fn debug_tree_shows_tokens_fields_and_whitespace() {
-        let parse = assert_lossless("class Foo\n");
+        let tree = assert_lossless("class Foo\n");
         assert_eq!(
-            format!("{:#?}", parse.syntax()),
+            format!("{:#?}", tree.syntax()),
             concat!(
                 "compilation_unit@0..10\n",
                 "  class_definition@0..9\n",
@@ -929,7 +929,7 @@ mod tests {
                 "  whitespace@9..10 \"\\n\"\n",
             )
         );
-        assert!(parse.errors().is_empty());
+        assert!(tree.errors().is_empty());
     }
 
     #[test]
@@ -961,16 +961,16 @@ object Main extends App {
 
     #[test]
     fn scala3_file_round_trips() {
-        let parse = assert_lossless(
+        let tree = assert_lossless(
             "enum Color:\n  case Red, Green\n\ndef show(c: Color): String =\n  c match\n    case Color.Red => \"red\"\n    case _ => \"other\"\n\nextension (s: String)\n  def shout: String = s.toUpperCase + \"!\"\n",
         );
-        assert!(parse.errors().is_empty(), "{:#?}", parse.syntax());
+        assert!(tree.errors().is_empty(), "{:#?}", tree.syntax());
     }
 
     #[test]
     fn interpolated_string_text_is_not_whitespace() {
-        let parse = assert_lossless(r#"val x = s"${a} ${b}""#);
-        let root = parse.syntax();
+        let tree = assert_lossless(r#"val x = s"${a} ${b}""#);
+        let root = tree.syntax();
         assert!(
             !root.tokens().any(|t| t.kind() == SyntaxKind::Whitespace
                 && t.parent().unwrap().kind().name().contains("string")),
@@ -980,8 +980,8 @@ object Main extends App {
 
     #[test]
     fn comments_are_trivia() {
-        let parse = assert_lossless("// head\nval x = 1 /* mid */\n// tail");
-        let root = parse.syntax();
+        let tree = assert_lossless("// head\nval x = 1 /* mid */\n// tail");
+        let root = tree.syntax();
         let comment_text: String = root
             .tokens()
             .filter(|t| t.is_trivia() && t.kind() != SyntaxKind::Whitespace)
@@ -998,8 +998,8 @@ object Main extends App {
 
     #[test]
     fn child_by_field_name_finds_names() {
-        let parse = assert_lossless("object Main { def run(x: Int): Unit = () }");
-        let def = parse
+        let tree = assert_lossless("object Main { def run(x: Int): Unit = () }");
+        let def = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::FunctionDefinition)
@@ -1013,8 +1013,8 @@ object Main extends App {
 
     #[test]
     fn children_are_nodes_and_children_with_tokens_are_everything() {
-        let parse = parse("val x = 1");
-        let val = parse.syntax().children().next().unwrap();
+        let tree = parse("val x = 1");
+        let val = tree.syntax().children().next().unwrap();
         assert_eq!(val.kind(), SyntaxKind::ValDefinition);
         let nodes: Vec<_> = val.children().collect();
         assert!(nodes.is_empty(), "every child of `val x = 1` is a token");
@@ -1024,8 +1024,8 @@ object Main extends App {
 
     #[test]
     fn ancestors_walk_up_to_the_root() {
-        let parse = parse("object A { def f = 1 }");
-        let one = parse.syntax().tokens().find(|t| t.text() == "1").unwrap();
+        let tree = parse("object A { def f = 1 }");
+        let one = tree.syntax().tokens().find(|t| t.text() == "1").unwrap();
         let kinds: Vec<_> = one.parent_ancestors().map(|n| n.kind()).collect();
         assert_eq!(
             kinds,
@@ -1042,13 +1042,13 @@ object Main extends App {
             Some(def),
             "ancestors starts at the node itself"
         );
-        assert_eq!(parse.syntax().ancestors().count(), 1);
+        assert_eq!(tree.syntax().ancestors().count(), 1);
     }
 
     #[test]
     fn non_trivia_children_skip_whitespace_and_comments() {
-        let parse = parse("def f(\n  a: Int, // first\n  /* doc */ b: Int\n) = 1");
-        let params = parse
+        let tree = parse("def f(\n  a: Int, // first\n  /* doc */ b: Int\n) = 1");
+        let params = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::Parameters)
@@ -1070,8 +1070,8 @@ object Main extends App {
 
     #[test]
     fn non_trivia_children_keep_missing_tokens() {
-        let parse = parse("object A {\n  val x = 1\n");
-        let body = parse
+        let tree = parse("object A {\n  val x = 1\n");
+        let body = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::TemplateBody)
@@ -1082,14 +1082,14 @@ object Main extends App {
             .unwrap()
             .into_token()
             .unwrap();
-        assert!(last.is_missing(), "{:#?}", parse.syntax());
+        assert!(last.is_missing(), "{:#?}", tree.syntax());
         assert_eq!(last.kind(), crate::T!["}"]);
     }
 
     #[test]
     fn siblings_and_index_agree() {
-        let parse = parse("val x = 1");
-        let val = parse.syntax().first_child_or_token().unwrap();
+        let tree = parse("val x = 1");
+        let val = tree.syntax().first_child_or_token().unwrap();
         let children: Vec<_> = val.as_node().unwrap().children_with_tokens().collect();
         for (i, child) in children.iter().enumerate() {
             assert_eq!(child.index(), i);
@@ -1106,8 +1106,8 @@ object Main extends App {
 
     #[test]
     fn preorder_enters_and_leaves_in_order() {
-        let parse = parse("class A");
-        let events: Vec<String> = parse
+        let tree = parse("class A");
+        let events: Vec<String> = tree
             .syntax()
             .preorder()
             .map(|e| match e {
@@ -1128,22 +1128,21 @@ object Main extends App {
 
     #[test]
     fn walking_a_subtree_stays_inside_it() {
-        let parse = parse("class A\nclass B");
-        let a = parse.syntax().children().next().unwrap();
+        let tree = parse("class A\nclass B");
+        let a = tree.syntax().children().next().unwrap();
         let texts: Vec<_> = a.descendants_with_tokens().map(|e| e.text()).collect();
         assert_eq!(texts, ["class A", "class", " ", "A"]);
     }
 
     #[test]
     fn errors_are_reported_and_tree_stays_lossless() {
-        let parse = assert_lossless("object A {\n  def f( = 1\n");
-        let errors = parse.errors();
-        assert!(!errors.is_empty(), "{:#?}", parse.syntax());
-        let (line, _) = parse.line_col(errors[0].range().start());
+        let tree = assert_lossless("object A {\n  def f( = 1\n");
+        let errors = tree.errors();
+        assert!(!errors.is_empty(), "{:#?}", tree.syntax());
+        let (line, _) = tree.line_col(errors[0].range().start());
         assert_eq!(line, 2, "{errors:?}");
         assert!(
-            parse
-                .syntax()
+            tree.syntax()
                 .descendants()
                 .any(|n| n.kind() == SyntaxKind::Error),
             "tree-sitter's error symbol maps to SyntaxKind::Error"
@@ -1163,15 +1162,15 @@ object Main extends App {
     fn deep_nesting_does_not_overflow() {
         let depth = 2000;
         let source = format!("val x = {}1{}", "(".repeat(depth), ")".repeat(depth));
-        let parse = assert_lossless(&source);
-        assert!(format!("{:#?}", parse.syntax()).lines().count() > depth);
+        let tree = assert_lossless(&source);
+        assert!(format!("{:#?}", tree.syntax()).lines().count() > depth);
     }
 
     #[test]
     fn iterators_outlive_the_handle_they_came_from() {
-        let parse = parse("class A { val x = 1 }");
+        let tree = parse("class A { val x = 1 }");
         // Each handle here is a temporary; the iterators only borrow `parse`.
-        let kinds: Vec<_> = parse
+        let kinds: Vec<_> = tree
             .syntax()
             .children()
             .next()
@@ -1179,7 +1178,7 @@ object Main extends App {
             .children()
             .map(|n| n.kind())
             .collect();
-        let first = parse.syntax().first_token().unwrap();
+        let first = tree.syntax().first_token().unwrap();
         let mut trivia = first.next_token().unwrap().leading_trivia();
         assert!(trivia.next().is_none());
         assert_eq!(kinds.len(), 1);
@@ -1187,11 +1186,11 @@ object Main extends App {
 
     #[test]
     fn line_col_counts_characters() {
-        let parse = parse("val a = 1\nval é = 2");
-        let text = parse.syntax().text();
-        assert_eq!(parse.line_col(0.into()), (1, 1));
-        assert_eq!(parse.line_col(size(text.find('=').unwrap())), (1, 7));
-        assert_eq!(parse.line_col(size(text.rfind('=').unwrap())), (2, 7));
+        let tree = parse("val a = 1\nval é = 2");
+        let text = tree.syntax().text();
+        assert_eq!(tree.line_col(0.into()), (1, 1));
+        assert_eq!(tree.line_col(size(text.find('=').unwrap())), (1, 7));
+        assert_eq!(tree.line_col(size(text.rfind('=').unwrap())), (2, 7));
     }
 }
 
@@ -1232,9 +1231,9 @@ pub(crate) mod corpus {
     /// Doubles every run of spaces between two tokens on the same line,
     /// leaving line breaks and indentation alone.
     fn widen_spaces(source: &str) -> String {
-        let parse = parse(source);
+        let tree = parse(source);
         let mut out = String::with_capacity(source.len() * 2);
-        for token in parse.syntax().tokens() {
+        for token in tree.syntax().tokens() {
             out.push_str(token.text());
             let start = usize::from(token.text_range().start());
             let at_line_start = start == 0 || matches!(source.as_bytes()[start - 1], b'\n' | b'\r');
@@ -1291,18 +1290,18 @@ pub(crate) mod corpus {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let parse = parse(&source);
-            if !parse.errors().is_empty() {
+            let tree = parse(&source);
+            if !tree.errors().is_empty() {
                 continue;
             }
-            for region in parse
+            for region in tree
                 .syntax()
                 .descendants()
                 .filter(SyntaxNode::is_indentation_region)
             {
                 regions += 1;
                 if let Some(problem) = region.region_problem() {
-                    let (line, _) = parse.line_col(region.text_range().start());
+                    let (line, _) = tree.line_col(region.text_range().start());
                     let at = format!("{}:{line} {:?}", path.display(), region.kind());
                     by_problem
                         .entry(format!("{problem:?}"))
@@ -1330,10 +1329,10 @@ pub(crate) mod corpus {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let parse = parse(&source);
-            let root = parse.syntax();
+            let tree = parse(&source);
+            let root = tree.syntax();
             assert_eq!(root.to_string(), source, "{}", path.display());
-            assert_eq!(trivia::reassemble(&parse), source, "{}", path.display());
+            assert_eq!(trivia::reassemble(&tree), source, "{}", path.display());
             for node in root.descendants() {
                 let text: String = node.tokens().map(|t| t.text()).collect();
                 assert_eq!(text, node.text(), "{node:?} in {}", path.display());
@@ -1347,7 +1346,7 @@ pub(crate) mod corpus {
                         .count()
                 })
                 .sum::<usize>()
-                + parse.eof_trivia().filter(|t| t.is_comment()).count();
+                + tree.eof_trivia().filter(|t| t.is_comment()).count();
             let in_tree = root
                 .descendants_with_tokens()
                 .filter(|e| match e {
@@ -1364,9 +1363,9 @@ pub(crate) mod corpus {
                 path.display()
             );
             comments += attached;
-            with_errors += usize::from(!parse.errors().is_empty());
-            verbatim::assert_well_formed(&parse);
-            for range in parse.verbatim_ranges() {
+            with_errors += usize::from(!tree.errors().is_empty());
+            verbatim::assert_well_formed(&tree);
+            for range in tree.verbatim_ranges() {
                 let reason = format!("{:?}", range.reason);
                 let reason = reason.split('(').next().unwrap_or_default().to_string();
                 *verbatim.entry(reason).or_default() += 1;

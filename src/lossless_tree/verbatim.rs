@@ -7,8 +7,8 @@
 use std::sync::OnceLock;
 
 use super::{
-    NodeOrToken, Parse, RegionProblem, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia,
-    TextRange, TextSize, TriviaKind,
+    NodeOrToken, RegionProblem, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextRange,
+    TextSize, Tree, TriviaKind,
 };
 
 /// Why a range must be copied unchanged.
@@ -36,7 +36,7 @@ pub struct VerbatimRange {
     pub reason: VerbatimReason,
 }
 
-impl Parse {
+impl Tree {
     /// Every verbatim range, sorted and non-overlapping. Nested ranges are
     /// merged into the outermost one, which keeps its reason.
     pub fn verbatim_ranges(&self) -> &[VerbatimRange] {
@@ -63,7 +63,7 @@ impl SyntaxNode<'_> {
 
 pub(super) type Cache = OnceLock<Vec<VerbatimRange>>;
 
-fn compute(parse: &Parse) -> Vec<VerbatimRange> {
+fn compute(parse: &Tree) -> Vec<VerbatimRange> {
     let root = parse.syntax();
     let mut found = Vec::new();
     for element in root.descendants_with_tokens() {
@@ -200,7 +200,7 @@ fn format_off_ranges(comments: &[SyntaxTrivia<'_>], end_of_file: TextSize) -> Ve
 /// Checks the ranges are sorted, disjoint, non-empty, inside the file, and
 /// never cut through a token.
 #[cfg(test)]
-pub(super) fn assert_well_formed(parse: &Parse) {
+pub(super) fn assert_well_formed(parse: &Tree) {
     let ranges = parse.verbatim_ranges();
     for pair in ranges.windows(2) {
         assert!(
@@ -230,12 +230,11 @@ mod tests {
 
     fn reasons(source: &str) -> Vec<(&str, VerbatimReason)> {
         // Leaked so the returned texts can borrow from it; fine in tests.
-        let parse = Box::leak(Box::new(parse(source)));
-        assert_well_formed(parse);
-        parse
-            .verbatim_ranges()
+        let tree = Box::leak(Box::new(parse(source)));
+        assert_well_formed(tree);
+        tree.verbatim_ranges()
             .iter()
-            .map(|r| (&parse.syntax().text()[r.range], r.reason))
+            .map(|r| (&tree.syntax().text()[r.range], r.reason))
             .collect()
     }
 
@@ -262,17 +261,17 @@ mod tests {
     #[test]
     fn a_line_starting_inside_a_string_is_verbatim() {
         let source = "object A:\n  val c = \"\"\"one\n    two\"\"\"\n  val d = 1\n";
-        let parse = parse(source);
+        let tree: Tree = parse(source);
         let line_start = |n: usize| -> TextSize {
             let offset: usize = source.split_inclusive('\n').take(n - 1).map(str::len).sum();
             TextSize::try_from(offset).unwrap()
         };
-        assert!(parse.verbatim_at(line_start(2)).is_none());
+        assert!(tree.verbatim_at(line_start(2)).is_none());
         assert_eq!(
-            parse.verbatim_at(line_start(3)).unwrap().reason,
+            tree.verbatim_at(line_start(3)).unwrap().reason,
             VerbatimReason::StringLiteral
         );
-        assert!(parse.verbatim_at(line_start(4)).is_none());
+        assert!(tree.verbatim_at(line_start(4)).is_none());
     }
 
     #[test]
@@ -338,8 +337,8 @@ mod tests {
 
     #[test]
     fn node_inside_a_range_reports_it() {
-        let parse = parse("val b = s\"${f(1)}\"\n");
-        let call = parse
+        let tree = parse("val b = s\"${f(1)}\"\n");
+        let call = tree
             .syntax()
             .descendants()
             .find(|n| n.kind() == SyntaxKind::CallExpression)
@@ -348,7 +347,7 @@ mod tests {
             call.verbatim_range().unwrap().reason,
             VerbatimReason::StringLiteral
         );
-        let val = parse.syntax().children().next().unwrap();
+        let val = tree.syntax().children().next().unwrap();
         assert!(val.verbatim_range().is_none());
     }
 }

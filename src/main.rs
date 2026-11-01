@@ -45,14 +45,14 @@ fn parse(file: Option<PathBuf>, quiet: bool) -> ExitCode {
         Err(code) => return code,
     };
 
-    let parse = lossless_tree::parse(&source);
+    let tree = lossless_tree::parse(&source);
     if !quiet {
-        print!("{:#?}", parse.syntax());
+        print!("{:#?}", tree.syntax());
     }
 
-    let errors = parse.errors();
+    let errors = tree.errors();
     for error in errors {
-        let (line, col) = parse.line_col(error.range().start());
+        let (line, col) = tree.line_col(error.range().start());
         eprintln!("{name}:{line}:{col}: error: {error}");
     }
     if errors.is_empty() {
@@ -69,15 +69,15 @@ fn comments(file: Option<PathBuf>) -> ExitCode {
         Ok(input) => input,
         Err(code) => return code,
     };
-    let parse = lossless_tree::parse(&source);
+    let tree = lossless_tree::parse(&source);
     let print = |trivia: lossless_tree::SyntaxTrivia<'_>, place: &str, owner: &str| {
-        let (line, col) = parse.line_col(trivia.text_range().start());
+        let (line, col) = tree.line_col(trivia.text_range().start());
         println!(
             "{name}:{line}:{col}: {place:<8} {owner:<12} {:?}",
             trivia.text()
         );
     };
-    for token in parse.syntax().tokens() {
+    for token in tree.syntax().tokens() {
         let owner = format!("{:?}", token.text());
         for trivia in token.leading_trivia().filter(|t| t.is_comment()) {
             print(trivia, "leading", &owner);
@@ -86,7 +86,7 @@ fn comments(file: Option<PathBuf>) -> ExitCode {
             print(trivia, "trailing", &owner);
         }
     }
-    for trivia in parse.eof_trivia().filter(|t| t.is_comment()) {
+    for trivia in tree.eof_trivia().filter(|t| t.is_comment()) {
         print(trivia, "eof", "");
     }
     ExitCode::SUCCESS

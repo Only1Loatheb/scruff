@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use crate::T;
 use crate::lossless_tree::{
-    NodeOrToken, Parse, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize,
+    NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Tree,
     VerbatimReason,
 };
 
@@ -33,8 +33,8 @@ pub(super) struct Reindent {
 }
 
 impl Reindent {
-    pub(super) fn new(parse: &Parse) -> Reindent {
-        compute(parse).unwrap_or_default()
+    pub(super) fn new(tree: &Tree) -> Reindent {
+        compute(tree).unwrap_or_default()
     }
 
     /// The new indentation of the line whose first non-blank character is
@@ -74,9 +74,9 @@ struct Line {
     comment: bool,
 }
 
-fn compute(parse: &Parse) -> Option<Reindent> {
-    let text = parse.syntax().text();
-    let copied_for_layout = parse.verbatim_ranges().iter().any(|v| {
+fn compute(tree: &Tree) -> Option<Reindent> {
+    let text = tree.syntax().text();
+    let copied_for_layout = tree.verbatim_ranges().iter().any(|v| {
         matches!(
             v.reason,
             VerbatimReason::UnsafeIndentation(_)
@@ -99,7 +99,7 @@ fn compute(parse: &Parse) -> Option<Reindent> {
             continue;
         }
         // A line inside a multi-line string or comment is content.
-        if parse
+        if tree
             .verbatim_at(line_start)
             .is_some_and(|v| v.range.start() < line_start)
         {
@@ -117,12 +117,12 @@ fn compute(parse: &Parse) -> Option<Reindent> {
     let line_of = |offset: TextSize| lines.partition_point(|l| l.first <= offset).checked_sub(1);
 
     let mut containers = vec![Container {
-        inner: parse.syntax().text_range(),
-        statements: parse.syntax().non_trivia_children().collect(),
+        inner: tree.syntax().text_range(),
+        statements: tree.syntax().non_trivia_children().collect(),
         opener: None,
         cases: false,
     }];
-    for node in parse.syntax().descendants() {
+    for node in tree.syntax().descendants() {
         if let Some(container) = container(node) {
             containers.push(container);
         }
@@ -339,8 +339,8 @@ mod tests {
 
     /// The source with each line moved to its new indentation.
     fn reindented(source: &str) -> String {
-        let parse = parse(source);
-        let reindent = Reindent::new(&parse);
+        let tree = parse(source);
+        let reindent = Reindent::new(&tree);
         let mut out = String::new();
         let mut start = 0;
         for line in source.split_inclusive('\n') {
