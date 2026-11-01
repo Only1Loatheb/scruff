@@ -12,7 +12,8 @@
 //! expected output
 //! ```
 //!
-//! `<<< SKIP name` skips a case. `<<< ONLY name` runs only the marked cases,
+//! Lines starting with `#` in settings are comments. `<<< SKIP name` skips
+//! a case. `<<< ONLY name` runs only the marked cases,
 //! then fails so it isn't committed by accident. An expected output of
 //! `test does not parse` means the formatter must refuse the input.
 //!
@@ -48,7 +49,7 @@ const DOES_NOT_PARSE: &str = "test does not parse";
 fn apply_settings(options: &mut FormatOptions, lines: &[&str], file: &Path, first_line: usize) {
     for (i, line) in lines.iter().enumerate() {
         let at = format!("{}:{}", file.display(), first_line + i);
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
         let (key, value) = line

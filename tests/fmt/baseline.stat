@@ -48,7 +48,7 @@ object Main:
   end show
 end Main
 
-<<< spacing is kept for now
+<<< spacing within a line is normalized, indentation is kept
 maxColumn = 20
 ===
 object A {
@@ -56,7 +56,7 @@ object A {
 }
 >>>
 object A {
-	def f =   1   // tab and extra spaces
+	def f = 1 // tab and extra spaces
 }
 
 <<< format off and on

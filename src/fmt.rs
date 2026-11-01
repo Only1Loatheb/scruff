@@ -1,5 +1,7 @@
 use std::fmt;
 
+mod spacing;
+
 use crate::doc::{Doc, PrintOptions, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, Parse, SyntaxElement, SyntaxError, SyntaxNode, SyntaxToken,
@@ -68,6 +70,7 @@ pub fn format(source: &str, options: &FormatOptions) -> Result<String, FormatErr
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
     let mut formatter = Formatter {
+        parse,
         text: parse.syntax().text(),
         verbatim: parse.verbatim_ranges(),
         next_verbatim: 0,
@@ -81,6 +84,7 @@ pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
 /// Builds a [`Doc`] from the tree, copying verbatim ranges as they're
 /// reached.
 struct Formatter<'t> {
+    parse: &'t Parse,
     text: &'t str,
     verbatim: &'t [VerbatimRange],
     /// The first verbatim range that hasn't ended before the current
@@ -116,14 +120,85 @@ impl<'t> Formatter<'t> {
 
     fn token(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
         let mut docs = Vec::new();
+        // Indentation after a line break stays; a gap after a comment on the
+        // same line becomes one space.
+        let mut after_comment = false;
         for trivia in token.leading_trivia() {
-            docs.push(self.trivia(trivia));
+            docs.push(self.gap_or_trivia(trivia, after_comment));
+            after_comment = trivia.is_comment();
         }
         docs.push(self.source(token.text_range(), Piece::Code));
-        for trivia in token.trailing_trivia() {
-            docs.push(self.trivia(trivia));
+
+        let trailing: Vec<_> = token.trailing_trivia().collect();
+        let next = std::iter::successors(token.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia() && !t.is_missing());
+        let next_on_this_line = next.filter(|b| b.leading_trivia().len() == 0);
+        let only_spaces = trailing.iter().all(|t| t.kind() == TriviaKind::Whitespace);
+        match next_on_this_line {
+            Some(next) => {
+                let gap = TextRange::new(token.text_range().end(), next.text_range().start());
+                let rule = if self.gap_is_free(gap) {
+                    spacing::space_between(&token, &next)
+                } else {
+                    None
+                };
+                match rule {
+                    // Only spaces before the next code token: the rule decides.
+                    Some(space) if only_spaces => {
+                        if space {
+                            docs.push(Doc::text(" "));
+                        }
+                    }
+                    // Comments in between get one space on each side.
+                    Some(_) => {
+                        for trivia in trailing {
+                            docs.push(self.gap_or_trivia(trivia, true));
+                        }
+                    }
+                    None => {
+                        for trivia in trailing {
+                            docs.push(self.trivia(trivia));
+                        }
+                    }
+                }
+            }
+            // The end of the line: one space before a comment. Spaces at the
+            // very end go; the printer trims them anyway.
+            None if only_spaces => {}
+            None => {
+                for trivia in trailing {
+                    docs.push(self.gap_or_trivia(trivia, true));
+                }
+            }
         }
         Doc::concat(docs)
+    }
+
+    /// A space for whitespace between code and a comment on the same line,
+    /// otherwise the trivia as written.
+    fn gap_or_trivia(&mut self, trivia: SyntaxTrivia<'t>, within_line: bool) -> Doc<'t> {
+        if within_line
+            && trivia.kind() == TriviaKind::Whitespace
+            && self.is_free(trivia.text_range().start())
+        {
+            Doc::text(" ")
+        } else {
+            self.trivia(trivia)
+        }
+    }
+
+    /// Whether the source at `offset` may be changed: it's not in a verbatim
+    /// range.
+    fn is_free(&self, offset: TextSize) -> bool {
+        self.parse.verbatim_at(offset).is_none()
+    }
+
+    /// Whether no verbatim range overlaps `gap`. An empty gap right before a
+    /// range, as in `f(` before `"x"`, is outside it.
+    fn gap_is_free(&self, gap: TextRange) -> bool {
+        self.parse
+            .verbatim_at(gap.start())
+            .is_none_or(|v| v.range.start() >= gap.end())
     }
 
     fn trivia(&mut self, trivia: SyntaxTrivia<'t>) -> Doc<'t> {
@@ -229,30 +304,45 @@ mod tests {
         );
     }
 
-    /// Formats every error-free file in the corpus. Run with:
+    /// Formats every error-free file in the corpus, checking that each
+    /// result is equivalent, keeps every line break and indentation (the
+    /// rules so far only change spacing within lines), and is stable when
+    /// formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $OUF_CORPUS"]
-    fn corpus_baseline_reproduces_every_file() {
+    fn corpus_formats_every_file() {
+        // Files the formatter correctly refuses because tree-sitter-scala
+        // parses the formatted code differently, with the reason. None yet.
+        const KNOWN_REFUSALS: &[(&str, &str)] = &[];
         let files = crate::lossless_tree::corpus::corpus_files();
-        let (mut formatted, mut skipped, mut failures) = (0, 0, Vec::new());
+        let mut refused = 0;
+        let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
+        let indents = |s: &str| -> Vec<String> {
+            s.split('\n')
+                .map(|l| {
+                    let l = l.trim_end();
+                    l[..l.len() - l.trim_start().len()].to_string()
+                })
+                .collect()
+        };
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
             match format(&source, &FormatOptions::default()) {
                 Err(FormatError::SyntaxErrors(_)) => skipped += 1,
+                Err(FormatError::NotEquivalent(_))
+                    if KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file)) =>
+                {
+                    refused += 1;
+                }
                 Err(e) => failures.push(format!("{}: {e}", path.display())),
                 Ok(out) => {
                     formatted += 1;
-                    let strip = |s: &str| -> Vec<String> {
-                        s.split('\n').map(|l| l.trim_end().to_string()).collect()
-                    };
-                    if strip(&out) != strip(&source) {
-                        failures.push(format!(
-                            "{}: changed more than trailing whitespace",
-                            path.display()
-                        ));
+                    changed += usize::from(out != source);
+                    if indents(&out) != indents(&source) {
+                        failures.push(format!("{}: changed lines or indentation", path.display()));
                     } else if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str())
                     {
                         failures.push(format!("{}: not idempotent", path.display()));
@@ -260,11 +350,11 @@ mod tests {
                 }
             }
         }
-        for failure in failures.iter().take(10) {
+        for failure in failures.iter().take(15) {
             println!("{failure}");
         }
         println!(
-            "{} files: {formatted} formatted, {skipped} skipped for syntax errors, {} failed",
+            "{} files: {formatted} formatted ({changed} changed), {skipped} skipped for syntax errors, {refused} known refusals, {} failed",
             files.len(),
             failures.len()
         );

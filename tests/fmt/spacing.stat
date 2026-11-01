@@ -1,0 +1,599 @@
+# Spacing between tokens on the same line.
+#
+# Cases whose titles end with a source file and line, like
+# `(scala3/Vararg.stat:2)`, are copied from scalafmt (Apache-2.0), commit e1f0c2d,
+# scalafmt-tests/shared/src/test/resources/, and use scalafmt's default width.
+# Their expected outputs differ from the input only in spaces within lines.
+
+<<< one space around operators and after commas
+val x = f( a ,b )+g(c)*2
+>>>
+val x = f(a, b) + g(c) * 2
+
+<<< braces get spaces inside, except when empty
+object A{def f={}; def g ={x}}
+>>>
+object A { def f = {}; def g = { x } }
+
+<<< one space around comments within a line
+val x = a  /* why */  + b   // note
+>>>
+val x = a /* why */ + b // note
+
+<<< strings keep their spaces
+val s = f(  "a  b" ,  s"${ x }  y" )
+>>>
+val s = f("a  b", s"${ x }  y")
+
+<<< line breaks and indentation are kept
+def f(
+    a:Int,
+      b:Int) =
+  a+b
+>>>
+def f(
+    a: Int,
+      b: Int) =
+  a + b
+
+<<< a name ending in an underscore keeps its space before an operator
+val op_ : Int = 1
+>>>
+val op_ : Int = 1
+
+<<< an operator name keeps its space before a colon
+def + : Int = 1
+>>>
+def + : Int = 1
+
+<<< a quoted wildcard keeps its space before a colon
+def f(x: Expr[Any]) = x match
+  case '{ $_ : Boolean } => 1
+>>>
+def f(x: Expr[Any]) = x match
+  case '{ $_ : Boolean } => 1
+
+<<< a space after unary minus is kept
+def f = - 42
+def g = -42
+>>>
+def f = - 42
+def g = -42
+
+<<< parameters after annotation arguments keep their space
+class A @Inject()(b: C)
+class B @Inject (b: C)
+>>>
+class A @Inject() (b: C)
+class B @Inject (b: C)
+
+<<< a keyword used as a name applies without a space
+def extension (a: Int) = a
+>>>
+def extension(a: Int) = a
+
+<<< a backticked name starting a line keeps its gap
+object O {
+  {
+    `$`{e}
+    `$`{e2}
+  }
+}
+>>>
+object O {
+  {
+    `$`{ e }
+    `$`{ e2 }
+  }
+}
+
+<<< format off is left alone
+// format: off
+val x = f( a ,b )
+// format: on
+val y = f( a ,b )
+>>>
+// format: off
+val x = f( a ,b )
+// format: on
+val y = f(a, b)
+
+<<< extension method (scala3/Extension.stat:2)
+maxColumn = 80
+===
+extension [A](a: A  ) def add(b: A) = a + b
+>>>
+extension [A](a: A) def add(b: A) = a + b
+
+
+<<< extension group single line (scala3/Extension.stat:68)
+maxColumn = 80
+===
+extension      (a: A) { def add1      (b: A) = a + b; def add2(b: A) = a + b }
+>>>
+extension (a: A) { def add1(b: A) = a + b; def add2(b: A) = a + b }
+
+
+<<< extension soft apply (scala3/Extension.stat:104)
+maxColumn = 40
+===
+object A{
+  def extension(a : Int) = a + 1
+  `extension`(1)
+}
+>>>
+object A {
+  def extension(a: Int) = a + 1
+  `extension`(1)
+}
+
+
+<<< enum case with type parameters (scala3/Enum.stat:287)
+maxColumn = 80
+===
+enum Enum4 [ + T] {
+  case G(s: String)
+  case B extends Enum4[Int] with A
+  case C [V] (s: String) extends Enum4[V]
+  case D [T] (s: String) extends Enum4[T]
+}
+>>>
+enum Enum4[+T] {
+  case G(s: String)
+  case B extends Enum4[Int] with A
+  case C[V](s: String) extends Enum4[V]
+  case D[T](s: String) extends Enum4[T]
+}
+
+
+<<< simple opaque type (scala3/OpaqueType.stat:2)
+maxColumn = 80
+===
+opaque   type F = X
+>>>
+opaque type F = X
+
+
+<<< mixed modifiers (scala3/OpaqueType.stat:21)
+maxColumn = 80
+===
+private opaque   type T =   List[Int]
+>>>
+private opaque type T = List[Int]
+
+
+<<< simple (scala3/Export.stat:1)
+maxColumn = 80
+===
+export     scanUnit.scan
+>>>
+export scanUnit.scan
+
+
+<<< rename (scala3/Export.stat:10)
+maxColumn = 80
+# Expected output changed to sbt's style, spaces inside import braces.
+===
+export   printUnit.  {status  => _, _}
+>>>
+export printUnit.{ status => _, _ }
+
+
+<<< simple polymorphic function (scala3/PolyFunction.stat:2)
+maxColumn = 80
+===
+val t0 = [T] => (ts: List[T]) =>     ts.headOption
+>>>
+val t0 = [T] => (ts: List[T]) => ts.headOption
+
+
+<<< simple polymorphic function type (scala3/PolyFunction.stat:32)
+maxColumn = 80
+===
+type F0 = [T] => List[T]   =>    Option[T]
+>>>
+type F0 = [T] => List[T] => Option[T]
+
+
+<<< type (scala3/ContextFunction.stat:1)
+maxColumn = 80
+===
+type Executable[T] =   ExecutionContext  ?=>  T
+>>>
+type Executable[T] = ExecutionContext ?=> T
+
+
+<<< type with type params (scala3/ContextFunction.stat:5)
+maxColumn = 80
+===
+type Parseable[T] = ImpliedInstances.StringParser[ T ] ?=> Try[ T ]
+>>>
+type Parseable[T] = ImpliedInstances.StringParser[T] ?=> Try[T]
+
+
+<<< parameter type (scala3/ContextFunction.stat:9)
+maxColumn = 80
+===
+def collect[T]( thunk: Emitter[ T ] ?=> Unit ): Seq[T] = {}
+>>>
+def collect[T](thunk: Emitter[T] ?=> Unit): Seq[T] = {}
+
+
+<<< context function (scala3/ContextFunction.stat:13)
+maxColumn = 80
+===
+def f(x: Int): ExecutionContext  ?=>  Int = {}
+>>>
+def f(x: Int): ExecutionContext ?=> Int = {}
+
+
+<<< long parameter type (scala3/ContextFunction.stat:22)
+maxColumn = 80
+===
+def fn(x: S  ?=>  T  ?=>  U ) = {}
+>>>
+def fn(x: S ?=> T ?=> U) = {}
+
+
+<<< splice brace (scala3/Macro.stat:2)
+maxColumn = 80
+===
+${    locationImpl() }
+>>>
+${ locationImpl() }
+
+
+<<< quote brace (scala3/Macro.stat:6)
+maxColumn = 80
+===
+'{   new Location() }
+>>>
+'{ new Location() }
+
+
+<<< splice expr (scala3/Macro.stat:24)
+maxColumn = 80
+===
+val x   = $expr
+>>>
+val x = $expr
+
+
+<<< splice expr (scala3/Macro.stat:28)
+maxColumn = 80
+===
+${   assertImpl('expr  ) }
+>>>
+${ assertImpl('expr) }
+
+
+<<< splice expr2 (scala3/Macro.stat:32)
+maxColumn = 80
+===
+throw new   AssertionError(s"failed assertion: ${${ showExpr(expr) }}")
+>>>
+throw new AssertionError(s"failed assertion: ${${ showExpr(expr) }}")
+
+
+<<< functions in splices (scala3/Macro.stat:36)
+maxColumn = 80
+===
+'{   (x: T) => ${ f('x) } }
+>>>
+'{ (x: T) => ${ f('x) } }
+
+
+<<< functions quoted (scala3/Macro.stat:56)
+maxColumn = 80
+===
+(  x: Expr[T]) =>   ${  'f ('x) }
+>>>
+(x: Expr[T]) => ${ 'f('x) }
+
+
+<<< apply method with context argument (scala3/Using.stat:19)
+maxColumn = 40
+===
+max(2, 3)(using     intOrd)
+>>>
+max(2, 3)(using intOrd)
+
+
+<<< simple inline (scala3/InlineTransparent.stat:1)
+maxColumn = 80
+===
+inline val logging =     false
+>>>
+inline val logging = false
+
+
+<<< simple wildcard import (scala3/StarImport.stat:2)
+maxColumn = 80
+===
+import a . b . c . *
+>>>
+import a.b.c.*
+
+
+<<< star named import (scala3/StarImport.stat:6)
+maxColumn = 80
+===
+import a . b . c . `*`
+>>>
+import a.b.c.`*`
+
+
+<<< simple wildcard export (scala3/StarImport.stat:10)
+maxColumn = 80
+===
+export a . b . c . *
+>>>
+export a.b.c.*
+
+
+<<< star named export (scala3/StarImport.stat:14)
+maxColumn = 80
+===
+export a . b . c . `*`
+>>>
+export a.b.c.`*`
+
+
+<<< simple dependent function (scala3/DependentFunction.stat:2)
+maxColumn = 80
+===
+val extractor:   (e: Entry) => e.Key =    extractKey
+>>>
+val extractor: (e: Entry) => e.Key = extractKey
+
+
+<<< simple context dependent function (scala3/DependentFunction.stat:43)
+maxColumn = 80
+===
+val extractor:   (e: Entry) ?=> e.Key =    extractKey
+>>>
+val extractor: (e: Entry) ?=> e.Key = extractKey
+
+
+<<< class (scala3/ExtendsComma.stat:1)
+maxColumn = 80
+===
+class A extends XX,XY,XZ
+>>>
+class A extends XX, XY, XZ
+
+
+<<< simple infix (scala3/Infix.stat:2)
+maxColumn = 80
+===
+infix def   a(param: Int)=param
+>>>
+infix def a(param: Int) = param
+
+
+<<< soft identifier  infix (scala3/Infix.stat:6)
+maxColumn = 80
+===
+infix def   infix(infix: Int)=infix
+>>>
+infix def infix(infix: Int) = infix
+
+
+<<< infix type (scala3/Infix.stat:21)
+maxColumn = 80
+===
+infix type or  [X , Y]
+>>>
+infix type or[X, Y]
+
+
+<<< infix class (scala3/Infix.stat:25)
+maxColumn = 80
+===
+infix class A[B,   C]
+>>>
+infix class A[B, C]
+
+
+<<< infix trait (scala3/Infix.stat:29)
+maxColumn = 80
+===
+infix trait A[B,   C]
+>>>
+infix trait A[B, C]
+
+
+<<< extractor (scala3/Dialect.stat:1)
+maxColumn = 80
+===
+val List(a : _ *) = 2
+>>>
+val List(a: _*) = 2
+
+
+<<< trait parameters (scala3/Dialect.stat:5)
+maxColumn = 80
+===
+trait T(a : Int)
+>>>
+trait T(a: Int)
+
+
+<<< class (scala3/Derives.stat:1)
+maxColumn = 80
+===
+class A derives XX,XY,XZ
+>>>
+class A derives XX, XY, XZ
+
+
+<<< simple invocation (scala3/Vararg.stat:2)
+maxColumn = 80
+===
+val a = method(0, 1,"", others*)
+>>>
+val a = method(0, 1, "", others*)
+
+
+<<< old apply (scala3/Vararg.stat:6)
+maxColumn = 80
+===
+val a = method(0, 1,"", others: _*)
+>>>
+val a = method(0, 1, "", others: _*)
+
+
+<<< normal usage (scala3/Vararg.stat:18)
+maxColumn = 80
+===
+val a = List(0, 1, 1*2)
+>>>
+val a = List(0, 1, 1 * 2)
+
+
+<<< single import (scala3/RenameImportExport.stat:2)
+maxColumn = 80
+===
+import scala   as  java
+>>>
+import scala as java
+
+
+<<< select import (scala3/RenameImportExport.stat:6)
+maxColumn = 80
+===
+import java.util.List   as  `J-List`
+>>>
+import java.util.List as `J-List`
+
+
+<<< multiple imports (scala3/RenameImportExport.stat:10)
+maxColumn = 80
+# Expected output changed to sbt's style, spaces inside import braces.
+===
+import java.util.{List   as  `J-List`, LinkedList as Linked}
+>>>
+import java.util.{ List as `J-List`, LinkedList as Linked }
+
+
+<<< redundant braces (scala3/RenameImportExport.stat:23)
+maxColumn = 80
+# Expected output changed to sbt's style, spaces inside import braces.
+===
+import java.util.{List   as  `J-List`}
+>>>
+import java.util.{ List as `J-List` }
+
+
+<<< single export (scala3/RenameImportExport.stat:52)
+maxColumn = 80
+===
+export scala   as  java
+>>>
+export scala as java
+
+
+<<< select export (scala3/RenameImportExport.stat:56)
+maxColumn = 80
+===
+export java.util.List   as  `J-List`
+>>>
+export java.util.List as `J-List`
+
+
+<<< multiple exports (scala3/RenameImportExport.stat:60)
+maxColumn = 80
+# Expected output changed to sbt's style, spaces inside import braces.
+===
+export java.util.{List   as  `J-List`, LinkedList as Linked}
+>>>
+export java.util.{ List as `J-List`, LinkedList as Linked }
+
+
+<<< redundant braces export (scala3/RenameImportExport.stat:73)
+maxColumn = 80
+# Expected output changed to sbt's style, spaces inside import braces.
+===
+export java.util.{List   as  `J-List`}
+>>>
+export java.util.{ List as `J-List` }
+
+
+<<< alias abstract given (scala3/Given.stat:147)
+maxColumn = 80
+===
+given   ExecutionContext[  NoActualParameterIsNormallyHere] =   ForkJoinPool()
+>>>
+given ExecutionContext[NoActualParameterIsNormallyHere] = ForkJoinPool()
+
+
+<<< type lambda simple (scala3/TypeLambda.stat:2)
+maxColumn = 80
+===
+type   Tuple   =  [  X ] =>> (X, X)
+>>>
+type Tuple = [X] =>> (X, X)
+
+
+<<< type lambda ident (scala3/TypeLambda.stat:6)
+maxColumn = 80
+===
+type Of[S] = [F[_]] =>>   Scoped[F, S]
+>>>
+type Of[S] = [F[_]] =>> Scoped[F, S]
+
+
+<<< type lambda parameter (scala3/TypeLambda.stat:41)
+maxColumn = 80
+===
+def method(param : T[[  X ] =>> (X, X)]) = ???
+>>>
+def method(param: T[[X] =>> (X, X)]) = ???
+
+
+<<< type lambda multi (scala3/TypeLambda.stat:58)
+maxColumn = 80
+===
+type   Tuple   =  [  X ] =>> [Y] =>> (X, Y)
+>>>
+type Tuple = [X] =>> [Y] =>> (X, Y)
+
+
+<<< single-line (scala3/TraitParams.stat:2)
+maxColumn = 80
+===
+trait Foobar(a : String )
+>>>
+trait Foobar(a: String)
+
+
+<<< Space between annotation and ctor argument list (spaces/Constructor.stat:2)
+maxColumn = 100
+===
+class A @Inject()(b: C)
+>>>
+class A @Inject() (b: C)
+
+
+<<< Space between annotation and ctor argument list (with multiple argument list) (spaces/Constructor.stat:7)
+maxColumn = 100
+===
+class MyComponent @Inject()(ctx: Context)(ws: WSClient)
+>>>
+class MyComponent @Inject() (ctx: Context)(ws: WSClient)
+
+
+<<< Do not add add a space when a constructor has multiple argument lists #1528 (spaces/Constructor.stat:12)
+maxColumn = 100
+===
+new ShardEntity(rts) (onMessage)
+>>>
+new ShardEntity(rts)(onMessage)
+
+
+<<< preserve ctor lambda with zero args and parens (spaces/Constructor.stat:36)
+maxColumn = 100
+===
+val foo = new Bar ( () => println("a") )
+>>>
+val foo = new Bar(() => println("a"))
