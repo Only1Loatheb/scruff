@@ -8,80 +8,18 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
+pub use syntax_kind::SyntaxKind;
 pub use text_size::{TextRange, TextSize};
 use tree_sitter::{Language, Parser};
 pub use trivia::{SyntaxTrivia, TriviaKind};
 
+mod syntax_kind;
 mod trivia;
 
 /// The tree-sitter-scala language, loaded once.
 pub fn language() -> &'static Language {
     static LANGUAGE: OnceLock<Language> = OnceLock::new();
     LANGUAGE.get_or_init(|| tree_sitter_scala::LANGUAGE.into())
-}
-
-/// The kind of a node or token, such as `class_definition`, `identifier` or
-/// `"{"`. Wraps a raw `u16`: the tree-sitter symbol id, or one of the kinds
-/// this module adds.
-///
-/// Kinds compare equal to their name: `node.kind() == "class_definition"`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SyntaxKind(pub u16);
-
-impl SyntaxKind {
-    /// tree-sitter's built-in error symbol.
-    pub const ERROR: SyntaxKind = SyntaxKind(u16::MAX);
-    /// Whitespace between tokens. tree-sitter skips it; we keep it.
-    pub const WHITESPACE: SyntaxKind = SyntaxKind(u16::MAX - 1);
-    /// Source text inside a node that tree-sitter didn't assign to any child,
-    /// such as the literal parts of an interpolated string.
-    pub const TEXT: SyntaxKind = SyntaxKind(u16::MAX - 2);
-
-    pub fn name(self) -> &'static str {
-        match self {
-            SyntaxKind::ERROR => "ERROR",
-            SyntaxKind::WHITESPACE => "whitespace",
-            SyntaxKind::TEXT => "text",
-            SyntaxKind(id) => language().node_kind_for_id(id).unwrap_or("?"),
-        }
-    }
-
-    /// Named kinds (`identifier`, `class_definition`) versus anonymous ones,
-    /// which are literal keywords and punctuation (`"class"`, `"{"`).
-    pub fn is_named(self) -> bool {
-        match self {
-            SyntaxKind::ERROR | SyntaxKind::WHITESPACE | SyntaxKind::TEXT => true,
-            SyntaxKind(id) => language().node_kind_is_named(id),
-        }
-    }
-}
-
-impl PartialEq<str> for SyntaxKind {
-    fn eq(&self, other: &str) -> bool {
-        self.name() == other
-    }
-}
-
-impl PartialEq<&str> for SyntaxKind {
-    fn eq(&self, other: &&str) -> bool {
-        self.name() == *other
-    }
-}
-
-impl fmt::Debug for SyntaxKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_named() {
-            f.write_str(self.name())
-        } else {
-            write!(f, "{:?}", self.name())
-        }
-    }
-}
-
-impl fmt::Display for SyntaxKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name())
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,7 +136,7 @@ fn collect_errors(root: SyntaxNode<'_>) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     for element in root.descendants_with_tokens() {
         match element {
-            NodeOrToken::Node(node) if node.kind() == SyntaxKind::ERROR => {
+            NodeOrToken::Node(node) if node.kind() == SyntaxKind::Error => {
                 errors.push(SyntaxError::new(
                     format!("unexpected {}", describe(node.text())),
                     node.text_range(),
@@ -546,7 +484,7 @@ impl<'t> SyntaxToken<'t> {
 
     /// Whitespace and comments.
     pub fn is_trivia(&self) -> bool {
-        self.kind() == SyntaxKind::WHITESPACE || self.is_extra()
+        self.kind() == SyntaxKind::Whitespace || self.is_extra()
     }
 }
 
@@ -841,9 +779,9 @@ impl TreeBuilder<'_> {
         let text = &self.text[start..end];
         let node = &self.nodes[parent];
         let kind = if text.chars().all(char::is_whitespace) && !is_literal(node.kind) {
-            SyntaxKind::WHITESPACE
+            SyntaxKind::Whitespace
         } else {
-            SyntaxKind::TEXT
+            SyntaxKind::Text
         };
         let extra = node.extra;
         self.push_token(parent, kind, None, start, end, extra, false);
@@ -852,7 +790,16 @@ impl TreeBuilder<'_> {
 
 /// Nodes whose uncovered text is content, not whitespace between tokens.
 fn is_literal(kind: SyntaxKind) -> bool {
-    kind.name().contains("string") || kind.name().contains("comment")
+    matches!(
+        kind,
+        SyntaxKind::String
+            | SyntaxKind::InterpolatedString
+            | SyntaxKind::InterpolatedStringExpression
+            | SyntaxKind::XmlString
+            | SyntaxKind::Comment
+            | SyntaxKind::BlockComment
+            | SyntaxKind::XmlComment
+    )
 }
 
 fn field_name(id: std::num::NonZeroU16) -> Option<&'static str> {
@@ -869,20 +816,26 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
 
     // Our root always spans the whole file, even when tree-sitter's root
     // starts after leading whitespace.
-    b.start_node(SyntaxKind(ts_root.kind_id()), None, 0, text.len(), false);
+    b.start_node(
+        SyntaxKind::from_ts(ts_root.kind_id()),
+        None,
+        0,
+        text.len(),
+        false,
+    );
 
     let mut cursor = ts_tree.walk();
     if cursor.goto_first_child() {
         'walk: loop {
             let node = cursor.node();
-            let kind = SyntaxKind(node.kind_id());
+            let kind = SyntaxKind::from_ts(node.kind_id());
             let field = cursor.field_id().and_then(field_name);
             let (start, end) = (node.start_byte(), node.end_byte());
             // tree-sitter marks comments as "extra", but also some ERROR
             // nodes from error recovery. Those hold code, not comments.
-            let extra = node.is_extra() && kind != SyntaxKind::ERROR;
+            let extra = node.is_extra() && kind != SyntaxKind::Error;
 
-            if node.child_count() == 0 && kind != SyntaxKind::ERROR {
+            if node.child_count() == 0 && kind != SyntaxKind::Error {
                 b.token(kind, field, start, end, extra, node.is_missing());
             } else {
                 b.start_node(kind, field, start, end, extra);
@@ -1010,7 +963,7 @@ object Main extends App {
         let parse = assert_lossless(r#"val x = s"${a} ${b}""#);
         let root = parse.syntax();
         assert!(
-            !root.tokens().any(|t| t.kind() == SyntaxKind::WHITESPACE
+            !root.tokens().any(|t| t.kind() == SyntaxKind::Whitespace
                 && t.parent().unwrap().kind().name().contains("string")),
             "{root:#?}"
         );
@@ -1022,7 +975,7 @@ object Main extends App {
         let root = parse.syntax();
         let comment_text: String = root
             .tokens()
-            .filter(|t| t.is_trivia() && t.kind() != SyntaxKind::WHITESPACE)
+            .filter(|t| t.is_trivia() && t.kind() != SyntaxKind::Whitespace)
             .map(|t| t.text())
             .collect();
         assert_eq!(comment_text, "// head/* mid */// tail", "{root:#?}");
@@ -1040,7 +993,7 @@ object Main extends App {
         let def = parse
             .syntax()
             .descendants()
-            .find(|n| n.kind() == "function_definition")
+            .find(|n| n.kind() == SyntaxKind::FunctionDefinition)
             .unwrap();
         assert_eq!(def.child_by_field_name("name").unwrap().text(), "run");
         assert_eq!(
@@ -1053,7 +1006,7 @@ object Main extends App {
     fn children_are_nodes_and_children_with_tokens_are_everything() {
         let parse = parse("val x = 1");
         let val = parse.syntax().children().next().unwrap();
-        assert_eq!(val.kind(), "val_definition");
+        assert_eq!(val.kind(), SyntaxKind::ValDefinition);
         let nodes: Vec<_> = val.children().collect();
         assert!(nodes.is_empty(), "every child of `val x = 1` is a token");
         let all: Vec<_> = val.children_with_tokens().map(|e| e.text()).collect();
@@ -1064,14 +1017,14 @@ object Main extends App {
     fn ancestors_walk_up_to_the_root() {
         let parse = parse("object A { def f = 1 }");
         let one = parse.syntax().tokens().find(|t| t.text() == "1").unwrap();
-        let kinds: Vec<_> = one.parent_ancestors().map(|n| n.kind().name()).collect();
+        let kinds: Vec<_> = one.parent_ancestors().map(|n| n.kind()).collect();
         assert_eq!(
             kinds,
             [
-                "function_definition",
-                "template_body",
-                "object_definition",
-                "compilation_unit"
+                SyntaxKind::FunctionDefinition,
+                SyntaxKind::TemplateBody,
+                SyntaxKind::ObjectDefinition,
+                SyntaxKind::CompilationUnit
             ]
         );
         let def = one.parent().unwrap();
@@ -1089,7 +1042,7 @@ object Main extends App {
         let params = parse
             .syntax()
             .descendants()
-            .find(|n| n.kind() == "parameters")
+            .find(|n| n.kind() == SyntaxKind::Parameters)
             .unwrap();
         let texts: Vec<_> = params.non_trivia_children().map(|c| c.text()).collect();
         assert_eq!(texts, ["(", "a: Int", ",", "b: Int", ")"]);
@@ -1112,7 +1065,7 @@ object Main extends App {
         let body = parse
             .syntax()
             .descendants()
-            .find(|n| n.kind() == "template_body")
+            .find(|n| n.kind() == SyntaxKind::TemplateBody)
             .unwrap();
         let last = body
             .non_trivia_children()
@@ -1121,7 +1074,7 @@ object Main extends App {
             .into_token()
             .unwrap();
         assert!(last.is_missing(), "{:#?}", parse.syntax());
-        assert_eq!(last.kind(), "}");
+        assert_eq!(last.kind(), crate::T!["}"]);
     }
 
     #[test]
@@ -1183,8 +1136,8 @@ object Main extends App {
             parse
                 .syntax()
                 .descendants()
-                .any(|n| n.kind() == SyntaxKind::ERROR),
-            "tree-sitter's error symbol maps to SyntaxKind::ERROR"
+                .any(|n| n.kind() == SyntaxKind::Error),
+            "tree-sitter's error symbol maps to SyntaxKind::Error"
         );
     }
 
@@ -1221,11 +1174,6 @@ object Main extends App {
         let mut trivia = first.next_token().unwrap().leading_trivia();
         assert!(trivia.next().is_none());
         assert_eq!(kinds.len(), 1);
-    }
-
-    #[test]
-    fn our_kinds_dont_collide_with_grammar_kinds() {
-        assert!(language().node_kind_count() < usize::from(SyntaxKind::TEXT.0));
     }
 
     #[test]

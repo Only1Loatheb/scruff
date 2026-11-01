@@ -341,7 +341,7 @@ fn lex(root: SyntaxNode<'_>) -> Vec<Item> {
                 };
                 items.push(Item::Trivia(TriviaPiece { kind, range }));
             }
-        } else if token.kind() == SyntaxKind::WHITESPACE {
+        } else if token.kind() == SyntaxKind::Whitespace {
             split_whitespace(token.text_range(), &text[token.text_range()], &mut items);
         }
         // Anything else is a missing token: zero-width, no trivia.
@@ -531,7 +531,7 @@ mod tests {
         let val = parse
             .syntax()
             .descendants()
-            .find(|n| n.kind() == "val_definition")
+            .find(|n| n.kind() == SyntaxKind::ValDefinition)
             .unwrap();
         assert_eq!(comments(val.trailing_trivia()), ["// note"]);
     }
