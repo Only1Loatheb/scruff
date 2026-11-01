@@ -332,6 +332,11 @@ impl<'t> SyntaxNode<'t> {
         self.data().index
     }
 
+    /// This node, its parent, its grandparent, and so on up to the root.
+    pub fn ancestors(&self) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
+        std::iter::successors(Some(*self), SyntaxNode::parent)
+    }
+
     /// Child nodes, without tokens.
     pub fn children(&self) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
         self.children_with_tokens()
@@ -342,6 +347,14 @@ impl<'t> SyntaxNode<'t> {
     pub fn children_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<'t>> + use<'t> {
         let node = *self;
         (0..self.data().children.len()).filter_map(move |i| node.element_at(i))
+    }
+
+    /// Direct children that are code: everything except whitespace and
+    /// comments, which are reachable through each token's leading and
+    /// trailing trivia. Missing tokens are included.
+    pub fn non_trivia_children(&self) -> impl Iterator<Item = SyntaxElement<'t>> + use<'t> {
+        self.children_with_tokens()
+            .filter(|child| !child.is_trivia())
     }
 
     pub fn first_child_or_token(&self) -> Option<SyntaxElement<'t>> {
@@ -503,6 +516,11 @@ impl<'t> SyntaxToken<'t> {
         Some(self.parent_node())
     }
 
+    /// The token's parent, grandparent, and so on up to the root.
+    pub fn parent_ancestors(&self) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
+        self.parent_node().ancestors()
+    }
+
     /// Position among the parent's children (nodes and tokens).
     pub fn index(&self) -> usize {
         self.index
@@ -625,6 +643,14 @@ impl<'t> SyntaxElement<'t> {
         match self {
             NodeOrToken::Node(n) => n.prev_sibling_or_token(),
             NodeOrToken::Token(t) => t.prev_sibling_or_token(),
+        }
+    }
+
+    /// Whitespace, a comment, or part of a comment.
+    pub fn is_trivia(&self) -> bool {
+        match self {
+            NodeOrToken::Node(n) => n.is_extra(),
+            NodeOrToken::Token(t) => t.is_trivia(),
         }
     }
 }
@@ -1032,6 +1058,70 @@ object Main extends App {
         assert!(nodes.is_empty(), "every child of `val x = 1` is a token");
         let all: Vec<_> = val.children_with_tokens().map(|e| e.text()).collect();
         assert_eq!(all, ["val", " ", "x", " ", "=", " ", "1"]);
+    }
+
+    #[test]
+    fn ancestors_walk_up_to_the_root() {
+        let parse = parse("object A { def f = 1 }");
+        let one = parse.syntax().tokens().find(|t| t.text() == "1").unwrap();
+        let kinds: Vec<_> = one.parent_ancestors().map(|n| n.kind().name()).collect();
+        assert_eq!(
+            kinds,
+            [
+                "function_definition",
+                "template_body",
+                "object_definition",
+                "compilation_unit"
+            ]
+        );
+        let def = one.parent().unwrap();
+        assert_eq!(
+            def.ancestors().next(),
+            Some(def),
+            "ancestors starts at the node itself"
+        );
+        assert_eq!(parse.syntax().ancestors().count(), 1);
+    }
+
+    #[test]
+    fn non_trivia_children_skip_whitespace_and_comments() {
+        let parse = parse("def f(\n  a: Int, // first\n  /* doc */ b: Int\n) = 1");
+        let params = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == "parameters")
+            .unwrap();
+        let texts: Vec<_> = params.non_trivia_children().map(|c| c.text()).collect();
+        assert_eq!(texts, ["(", "a: Int", ",", "b: Int", ")"]);
+        // The skipped comments are still reachable as trivia.
+        let comma = params
+            .non_trivia_children()
+            .nth(2)
+            .unwrap()
+            .into_token()
+            .unwrap();
+        assert_eq!(
+            comma.trailing_trivia().filter(|t| t.is_comment()).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn non_trivia_children_keep_missing_tokens() {
+        let parse = parse("object A {\n  val x = 1\n");
+        let body = parse
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == "template_body")
+            .unwrap();
+        let last = body
+            .non_trivia_children()
+            .last()
+            .unwrap()
+            .into_token()
+            .unwrap();
+        assert!(last.is_missing(), "{:#?}", parse.syntax());
+        assert_eq!(last.kind(), "}");
     }
 
     #[test]
