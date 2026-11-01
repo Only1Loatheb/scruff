@@ -10,6 +10,9 @@ use std::sync::OnceLock;
 
 pub use text_size::{TextRange, TextSize};
 use tree_sitter::{Language, Parser};
+pub use trivia::{SyntaxTrivia, TriviaKind};
+
+mod trivia;
 
 /// The tree-sitter-scala language, loaded once.
 pub fn language() -> &'static Language {
@@ -108,6 +111,8 @@ struct TokenData {
     range: TextRange,
     extra: bool,
     missing: bool,
+    leading: trivia::TriviaSpan,
+    trailing: trivia::TriviaSpan,
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +123,8 @@ pub struct Parse {
     text: String,
     nodes: Vec<NodeData>,
     errors: Vec<SyntaxError>,
+    trivia: Vec<trivia::TriviaPiece>,
+    eof_trivia: trivia::TriviaSpan,
 }
 
 /// Parses Scala source. Never fails: errors are recorded in the tree.
@@ -326,13 +333,13 @@ impl<'t> SyntaxNode<'t> {
     }
 
     /// Child nodes, without tokens.
-    pub fn children(&self) -> impl Iterator<Item = SyntaxNode<'t>> + 't {
+    pub fn children(&self) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
         self.children_with_tokens()
             .filter_map(NodeOrToken::into_node)
     }
 
     /// All direct children, nodes and tokens, in source order.
-    pub fn children_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<'t>> + 't {
+    pub fn children_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<'t>> + use<'t> {
         let node = *self;
         (0..self.data().children.len()).filter_map(move |i| node.element_at(i))
     }
@@ -360,7 +367,7 @@ impl<'t> SyntaxNode<'t> {
     }
 
     /// Enter and leave events for this node and all nodes below it.
-    pub fn preorder(&self) -> impl Iterator<Item = WalkEvent<SyntaxNode<'t>>> + 't {
+    pub fn preorder(&self) -> impl Iterator<Item = WalkEvent<SyntaxNode<'t>>> + use<'t> {
         self.preorder_with_tokens().filter_map(|event| match event {
             WalkEvent::Enter(NodeOrToken::Node(n)) => Some(WalkEvent::Enter(n)),
             WalkEvent::Leave(NodeOrToken::Node(n)) => Some(WalkEvent::Leave(n)),
@@ -377,19 +384,19 @@ impl<'t> SyntaxNode<'t> {
     }
 
     /// This node and all nodes below it, in source order.
-    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode<'t>> + 't {
+    pub fn descendants(&self) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
         self.preorder().filter_map(WalkEvent::into_enter)
     }
 
     /// This node and everything below it, in source order.
-    pub fn descendants_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<'t>> + 't {
+    pub fn descendants_with_tokens(&self) -> impl Iterator<Item = SyntaxElement<'t>> + use<'t> {
         self.preorder_with_tokens()
             .filter_map(WalkEvent::into_enter)
     }
 
     /// All tokens under this node, in source order. Their texts concatenate
     /// to `self.text()`.
-    pub fn tokens(&self) -> impl Iterator<Item = SyntaxToken<'t>> + 't {
+    pub fn tokens(&self) -> impl Iterator<Item = SyntaxToken<'t>> + use<'t> {
         self.descendants_with_tokens()
             .filter_map(NodeOrToken::into_token)
     }
@@ -794,6 +801,8 @@ impl TreeBuilder<'_> {
             range: TextRange::new(size(start), size(end)),
             extra,
             missing,
+            leading: Default::default(),
+            trailing: Default::default(),
         }));
     }
 
@@ -843,11 +852,14 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
             let kind = SyntaxKind(node.kind_id());
             let field = cursor.field_id().and_then(field_name);
             let (start, end) = (node.start_byte(), node.end_byte());
+            // tree-sitter marks comments as "extra", but also some ERROR
+            // nodes from error recovery. Those hold code, not comments.
+            let extra = node.is_extra() && kind != SyntaxKind::ERROR;
 
             if node.child_count() == 0 && kind != SyntaxKind::ERROR {
-                b.token(kind, field, start, end, node.is_extra(), node.is_missing());
+                b.token(kind, field, start, end, extra, node.is_missing());
             } else {
-                b.start_node(kind, field, start, end, node.is_extra());
+                b.start_node(kind, field, start, end, extra);
                 if cursor.goto_first_child() {
                     continue 'walk;
                 }
@@ -877,7 +889,10 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
         text,
         nodes,
         errors: Vec::new(),
+        trivia: Vec::new(),
+        eof_trivia: Default::default(),
     };
+    trivia::attach(&mut parse);
     if ts_root.has_error() {
         parse.errors = collect_errors(parse.syntax());
     }
@@ -904,6 +919,7 @@ mod tests {
         }
         assert_eq!(usize::from(pos), source.len(), "tokens stop before the end");
         assert_eq!(root.to_string(), source);
+        assert_eq!(trivia::reassemble(&parse), source, "trivia doesn't add up");
         for node in root.descendants() {
             let text: String = node.tokens().map(|t| t.text()).collect();
             assert_eq!(text, node.text(), "tokens of {node:?} don't match its text");
@@ -1100,6 +1116,24 @@ object Main extends App {
     }
 
     #[test]
+    fn iterators_outlive_the_handle_they_came_from() {
+        let parse = parse("class A { val x = 1 }");
+        // Each handle here is a temporary; the iterators only borrow `parse`.
+        let kinds: Vec<_> = parse
+            .syntax()
+            .children()
+            .next()
+            .unwrap()
+            .children()
+            .map(|n| n.kind())
+            .collect();
+        let first = parse.syntax().first_token().unwrap();
+        let mut trivia = first.next_token().unwrap().leading_trivia();
+        assert!(trivia.next().is_none());
+        assert_eq!(kinds.len(), 1);
+    }
+
+    #[test]
     fn our_kinds_dont_collide_with_grammar_kinds() {
         assert!(language().node_kind_count() < usize::from(SyntaxKind::TEXT.0));
     }
@@ -1111,5 +1145,77 @@ object Main extends App {
         assert_eq!(parse.line_col(0.into()), (1, 1));
         assert_eq!(parse.line_col(size(text.find('=').unwrap())), (1, 7));
         assert_eq!(parse.line_col(size(text.rfind('=').unwrap())), (2, 7));
+    }
+}
+
+/// Checks every `.scala` file under `$OUF_CORPUS`. Run with:
+/// `OUF_CORPUS=path/to/scala/code cargo test --release corpus -- --ignored --nocapture`
+#[cfg(test)]
+mod corpus {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn scala_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scala_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "scala") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs OUF_CORPUS"]
+    fn corpus_round_trips() {
+        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
+        let mut files = Vec::new();
+        scala_files(Path::new(&root), &mut files);
+        let (mut with_errors, mut comments) = (0, 0);
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let parse = parse(&source);
+            let root = parse.syntax();
+            assert_eq!(root.to_string(), source, "{}", path.display());
+            assert_eq!(trivia::reassemble(&parse), source, "{}", path.display());
+            for node in root.descendants() {
+                let text: String = node.tokens().map(|t| t.text()).collect();
+                assert_eq!(text, node.text(), "{node:?} in {}", path.display());
+            }
+            let attached: usize = root
+                .tokens()
+                .map(|t| {
+                    t.leading_trivia()
+                        .chain(t.trailing_trivia())
+                        .filter(|t| t.is_comment())
+                        .count()
+                })
+                .sum::<usize>()
+                + parse.eof_trivia().filter(|t| t.is_comment()).count();
+            let in_tree = root
+                .descendants_with_tokens()
+                .filter(|e| match e {
+                    NodeOrToken::Node(n) => {
+                        n.is_extra() && !n.parent().is_some_and(|p| p.is_extra())
+                    }
+                    NodeOrToken::Token(t) => t.is_extra() && !t.parent().unwrap().is_extra(),
+                })
+                .count();
+            assert_eq!(
+                attached,
+                in_tree,
+                "every comment attached once: {}",
+                path.display()
+            );
+            comments += attached;
+            with_errors += usize::from(!parse.errors().is_empty());
+        }
+        println!(
+            "{} files, {comments} comments, {with_errors} files with syntax errors",
+            files.len()
+        );
     }
 }
