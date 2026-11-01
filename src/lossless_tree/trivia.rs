@@ -187,7 +187,7 @@ impl<'t> SyntaxToken<'t> {
     }
 
     /// Code tokens own trivia; whitespace, comments and missing tokens don't.
-    pub(super) fn owns_trivia(&self) -> bool {
+    pub(crate) fn owns_trivia(&self) -> bool {
         !self.is_trivia() && !self.is_missing()
     }
 }

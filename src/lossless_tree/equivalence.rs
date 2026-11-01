@@ -265,13 +265,29 @@ fn comments(parse: &Parse) -> Vec<Comment<'_>> {
     out
 }
 
+/// Whether two comments say the same. The indentation of a comment's lines
+/// after the first carries no meaning, so a formatter may move them with
+/// the code: a Scaladoc's ` *` lines follow its `/**`.
+fn same_comment(a: &str, b: &str) -> bool {
+    fn lines(s: &str) -> impl Iterator<Item = &str> {
+        s.lines().enumerate().map(|(i, l)| {
+            if i == 0 {
+                l
+            } else {
+                l.trim_start_matches([' ', '\t'])
+            }
+        })
+    }
+    a == b || lines(a).eq(lines(b))
+}
+
 fn check_comments(before: &Parse, after: &Parse) -> Result<(), Difference> {
     let b = comments(before);
     let a = comments(after);
     for i in 0..b.len().max(a.len()) {
         let (x, y) = (b.get(i), a.get(i));
         let message = match (x, y) {
-            (Some(x), Some(y)) if x.trivia.text() != y.trivia.text() => {
+            (Some(x), Some(y)) if !same_comment(x.trivia.text(), y.trivia.text()) => {
                 format!("comment {:?} became {:?}", x.trivia.text(), y.trivia.text())
             }
             (Some(x), Some(y))
@@ -348,6 +364,15 @@ mod tests {
         );
         // Only a lambda body: a definition's block is still a block.
         differs("def f = 1\n", "def f =\n  1\n");
+    }
+
+    #[test]
+    fn a_comment_can_be_reindented() {
+        let before = "object A {\n    /** Doc.\n      * More.\n      */\n    def f = 1\n}\n";
+        let after = "object A {\n  /** Doc.\n    * More.\n    */\n  def f = 1\n}\n";
+        assert_eq!(check_equivalent(before, after), Ok(()));
+        let changed = "object A {\n  /** Doc.\n    * Less.\n    */\n  def f = 1\n}\n";
+        assert_eq!(differs(before, changed).kind, DifferenceKind::Comment);
     }
 
     #[test]

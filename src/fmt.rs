@@ -1,12 +1,13 @@
 use std::fmt;
 
+mod indent;
 mod spacing;
 
 use crate::doc::{Doc, PrintOptions, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, Parse, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode,
-    SyntaxToken, SyntaxTrivia, TextRange, TextSize, TriviaKind, VerbatimRange, check_equivalent,
-    parse,
+    SyntaxToken, SyntaxTrivia, TextRange, TextSize, TriviaKind, VerbatimRange, VerbatimReason,
+    check_equivalent, parse,
 };
 
 /// Formatting is deliberately not configurable beyond this. Indentation is
@@ -72,23 +73,35 @@ fn format_with(source: &str, options: &FormatOptions, rules: Rules) -> Result<St
     if !parse.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(parse.errors().to_vec()));
     }
-    let doc = build_doc(&parse, rules);
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let formatted = print(&doc, &print_options);
-    check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
-    Ok(formatted)
+    let reindent = indent::Reindent::new(&parse);
+    let reindented = !reindent.is_empty();
+    let formatted = print(&build_doc(&parse, rules, reindent), &print_options);
+    match check_equivalent(source, &formatted) {
+        Ok(()) => Ok(formatted),
+        // Where tree-sitter-scala reads the layout differently from scalac,
+        // moving lines can change the tree. Keep the indentation as written
+        // then, and the rest of the formatting.
+        Err(_) if reindented => {
+            let doc = build_doc(&parse, rules, indent::Reindent::default());
+            let formatted = print(&doc, &print_options);
+            check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
+            Ok(formatted)
+        }
+        Err(difference) => Err(FormatError::NotEquivalent(difference)),
+    }
 }
 
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
-    build_doc(parse, Rules::Structural)
+    build_doc(parse, Rules::Structural, indent::Reindent::new(parse))
 }
 
-fn build_doc<'t>(parse: &'t Parse, rules: Rules) -> Doc<'t> {
+fn build_doc<'t>(parse: &'t Parse, rules: Rules, reindent: indent::Reindent) -> Doc<'t> {
     let mut formatter = Formatter {
         parse,
         rules,
@@ -98,6 +111,7 @@ fn build_doc<'t>(parse: &'t Parse, rules: Rules) -> Doc<'t> {
         copied_until: TextSize::from(0),
         leading_done: None,
         trailing_skipped: Vec::new(),
+        reindent,
     };
     let body = formatter.node(parse.syntax());
     let eof: Vec<_> = parse.eof_trivia().map(|t| formatter.trivia(t)).collect();
@@ -122,6 +136,8 @@ struct Formatter<'t> {
     /// Where the tokens start whose trailing gap a rule prints itself, such
     /// as the line break before a `}`. Nested rules can each add one.
     trailing_skipped: Vec<TextSize>,
+    /// New indentation for lines whose indentation changes.
+    reindent: indent::Reindent,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -629,6 +645,13 @@ impl<'t> Formatter<'t> {
                     docs.push(self.trivia(t));
                     before = Gap::LineStart;
                 }
+                TriviaKind::Whitespace if before == Gap::LineStart && self.is_free(start) => {
+                    match self.reindent.width(t.text_range().end()) {
+                        Some(width) => docs.push(Doc::text(" ".repeat(width))),
+                        None => docs.push(self.trivia(t)),
+                    }
+                    before = Gap::Space;
+                }
                 TriviaKind::Whitespace if before == Gap::LineStart || !self.is_free(start) => {
                     docs.push(self.trivia(t));
                     before = Gap::Space;
@@ -637,6 +660,12 @@ impl<'t> Formatter<'t> {
                 TriviaKind::Whitespace => {}
                 TriviaKind::LineComment | TriviaKind::BlockComment => {
                     let after_code = matches!(before, Gap::AfterCode | Gap::AfterComment);
+                    // A comment at column 0 that moves in.
+                    if before == Gap::LineStart
+                        && let Some(width) = self.reindent.width(start)
+                    {
+                        docs.push(Doc::text(" ".repeat(width)));
+                    }
                     let mut comment = Doc::Nil;
                     if after_code && self.free_at(start) {
                         comment = Doc::text(" ");
@@ -651,6 +680,13 @@ impl<'t> Formatter<'t> {
                     before = Gap::AfterComment;
                 }
             }
+        }
+        // Code at column 0 that moves in.
+        if let Some(next) = next
+            && before == Gap::LineStart
+            && let Some(width) = self.reindent.width(next.text_range().start())
+        {
+            docs.push(Doc::text(" ".repeat(width)));
         }
         if let Some(next) = next
             && before == Gap::AfterComment
@@ -709,7 +745,7 @@ impl<'t> Formatter<'t> {
             }
             match self.verbatim.get(self.next_verbatim) {
                 Some(v) if v.range.start() <= start => {
-                    docs.push(Doc::verbatim(&self.text[v.range]));
+                    docs.push(self.verbatim_range(*v));
                     self.copied_until = v.range.end();
                     self.next_verbatim += 1;
                 }
@@ -724,6 +760,38 @@ impl<'t> Formatter<'t> {
             }
         }
         Doc::concat(docs)
+    }
+
+    /// A verbatim range, copied. A multi-line comment starting a line that
+    /// moves moves all its lines by as much, so a Scaladoc's ` *` lines stay
+    /// under its `/**`.
+    fn verbatim_range(&self, v: VerbatimRange) -> Doc<'t> {
+        let text = &self.text[v.range];
+        let start = v.range.start();
+        let Some(width) = self
+            .reindent
+            .width(start)
+            .filter(|_| v.reason == VerbatimReason::Comment)
+        else {
+            return Doc::verbatim(text);
+        };
+        let line_start = self.text[..usize::from(start)]
+            .rfind('\n')
+            .map_or(0, |i| i + 1);
+        let shift = width as isize - (usize::from(start) - line_start) as isize;
+        let mut out = String::with_capacity(text.len());
+        for (i, line) in text.split_inclusive('\n').enumerate() {
+            if i == 0 || line.trim().is_empty() {
+                out.push_str(line);
+            } else if shift > 0 {
+                out.push_str(&" ".repeat(shift as usize));
+                out.push_str(line);
+            } else {
+                let spaces = line.len() - line.trim_start_matches(' ').len();
+                out.push_str(&line[spaces.min(shift.unsigned_abs())..]);
+            }
+        }
+        Doc::verbatim(out)
     }
 
     fn plain(&self, range: TextRange, piece: Piece) -> Doc<'t> {

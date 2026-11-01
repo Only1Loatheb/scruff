@@ -1,0 +1,151 @@
+# Indentation: a container's statements sit 2 spaces deeper than the line
+# that opens it, and every line inside moves by as much as its statement.
+
+<<< braces get two spaces per level
+object A {
+    def f = {
+            g(1)
+    }
+}
+>>>
+object A {
+  def f = {
+    g(1)
+  }
+}
+
+<<< Scala 3 regions get two spaces per level
+object A:
+    def f =
+          g(1)
+>>>
+object A:
+  def f =
+    g(1)
+
+<<< continuation lines keep their shape
+object A {
+    val x = f(
+        a,
+        b
+    )
+}
+>>>
+object A {
+  val x = f(
+      a,
+      b
+  )
+}
+
+<<< a body is indented from the first line of its definition
+class Cache[K, V](size: Int)
+    extends Base
+    with Logging {
+      def get(k: K): V = ???
+}
+>>>
+class Cache[K, V](size: Int)
+    extends Base
+    with Logging {
+  def get(k: K): V = ???
+}
+
+<<< a lambda body is indented from the line with its arrow
+object A {
+  val ys = xs
+    .map { x =>
+          x + 1
+    }
+}
+>>>
+object A {
+  val ys = xs
+    .map { x =>
+      x + 1
+    }
+}
+
+<<< cases are indented from the start of their match
+object A:
+  def f(c: Boolean) =
+    (if c then a
+     else b) match
+        case 1 => one
+        case _ => other
+>>>
+object A:
+  def f(c: Boolean) =
+    (if c then a
+     else b) match
+      case 1 => one
+      case _ => other
+
+<<< cases written at the width of their match stay there
+object A:
+  def f(x: Int) =
+    x match
+    case 1 => one
+    case _ => other
+>>>
+object A:
+  def f(x: Int) =
+    x match
+    case 1 => one
+    case _ => other
+
+<<< a Scaladoc moves with its definition
+object A {
+    /** Does it.
+      *
+      * @param a the input
+      */
+    def f(a: Int) = a
+}
+>>>
+object A {
+  /** Does it.
+    *
+    * @param a the input
+    */
+  def f(a: Int) = a
+}
+
+<<< comments at column 0 move in with the code
+object A {
+// note
+    def f = 1
+}
+>>>
+object A {
+  // note
+  def f = 1
+}
+
+<<< a block whose statements disagree moves with the block around it
+object A {
+    def f = {
+        a
+          b
+    }
+}
+>>>
+object A {
+  def f = {
+      a
+        b
+  }
+}
+
+<<< strings keep their lines
+object A {
+    val s = """
+      |text
+      |""".stripMargin
+}
+>>>
+object A {
+  val s = """
+      |text
+      |""".stripMargin
+}
