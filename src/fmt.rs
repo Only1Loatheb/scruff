@@ -940,8 +940,13 @@ mod tests {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_formats_every_file() {
         // Files the formatter correctly refuses because tree-sitter-scala
-        // parses the formatted code differently, with the reason. None yet.
-        const KNOWN_REFUSALS: &[(&str, &str)] = &[];
+        // parses the formatted code differently, with the reason.
+        const KNOWN_REFUSALS: &[(&str, &str)] = &[(
+            "scala3/tests/neg/binaryLiterals.scala",
+            "the invalid literal `0b` reads as `0` and a name `b`; the space \
+             between them makes `b` an operator ending its line, continued by \
+             the `0b2` below",
+        )];
         let files = crate::lossless_tree::corpus::corpus_files();
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());

@@ -7,8 +7,8 @@ use crate::lossless_tree::{SyntaxKind, SyntaxToken};
 /// and `List[Int]`, and prefix operators like `-x`.
 pub(super) fn space_between(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> Option<bool> {
     // Source tree-sitter didn't split into tokens, such as `end ` in an end
-    // marker or `_*` in a vararg, can absorb the spaces next to it. Keep
-    // those gaps as written. In a string the text is just its content.
+    // marker, can absorb the spaces next to it. Keep those gaps as written.
+    // In a string the text is just its content.
     let loose_text = |t: &SyntaxToken<'_>| {
         t.kind() == SyntaxKind::Text
             && !t.parent_ancestors().any(|n| {
@@ -78,26 +78,13 @@ fn decide(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
         return false;
     }
 
-    // Varargs: `xs*`, `xs: _*`, `args: String*`. tree-sitter reads the
-    // argument `xs: _ *` as a repeated type instead of a vararg, so that
-    // space stays.
-    if b.text() == "*"
-        && b.parent().is_some_and(|p| match p.kind() {
-            SyntaxKind::Vararg | SyntaxKind::RepeatPattern => true,
-            SyntaxKind::RepeatedParameterType => a.text() != "_",
-            _ => false,
-        })
-    {
-        return false;
-    }
-
-    // A splat after an expression, `f(a ++ b*)`, which tree-sitter reads
-    // as a postfix `*`.
+    // Varargs: `xs*`, `xs: _*`, `f(a ++ b*)`, `args: String*`.
     if b.text() == "*"
         && b.parent().is_some_and(|p| {
-            p.kind() == SyntaxKind::PostfixExpression
-                && p.parent()
-                    .is_some_and(|g| g.kind() == SyntaxKind::Arguments)
+            matches!(
+                p.kind(),
+                SyntaxKind::Vararg | SyntaxKind::RepeatPattern | SyntaxKind::RepeatedParameterType
+            )
         })
     {
         return false;

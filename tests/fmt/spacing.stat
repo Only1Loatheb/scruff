@@ -640,7 +640,7 @@ val y = f(xs.map { x =>
   x
 }*)
 
-<<< a spaced vararg wildcard keeps its space, which tree-sitter parses differently
+<<< a spaced vararg wildcard hugs its star
 val x = f(xs: _ *)
 >>>
-val x = f(xs: _ *)
+val x = f(xs: _*)

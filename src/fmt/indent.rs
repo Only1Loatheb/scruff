@@ -194,7 +194,15 @@ fn compute(parse: &Parse) -> Option<Reindent> {
             .zip(&lines)
             .filter(|(o, l)| **o == index && !l.comment)
             .all(|(_, l)| l.width >= floor && l.width as isize + candidate >= 0);
-        if fits {
+        // A line right after the container that was shallower than its
+        // statements stays shallower: in `xs.map: x =>`, the body, then
+        // `.filter(p)` between the two, a body moved to the `.filter` width
+        // would take it in.
+        let next = lines.partition_point(|l| l.first < container.inner.end());
+        let keeps_next = lines.get(next).is_none_or(|l| {
+            l.comment || l.width >= indent || l.width as isize + inherited < target as isize
+        });
+        if fits && keeps_next {
             shift[index] = candidate;
             placed[index] = Some((indent, target));
         }
@@ -373,6 +381,14 @@ mod tests {
     fn already_formatted_code_stays() {
         let source = "object A {\n  def f = {\n    g(\n      a\n    )\n  }\n}\n";
         assert_eq!(Reindent::new(&parse(source)).len(), 0);
+    }
+
+    #[test]
+    fn a_continuation_after_a_body_stays_outside_it() {
+        // Moving the body to 4 would put `.map` inside it.
+        let source = "object O:\n  val q = xs.filter: x =>\n      x > 1\n    .map: x =>\n      x\n";
+        let out = reindented(source);
+        assert!(out.contains("\n      x > 1\n    .map"), "{out}");
     }
 
     #[test]

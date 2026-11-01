@@ -363,24 +363,35 @@ mod tests {
     }
 
     #[test]
-    fn misparsed_infix_operators_are_flagged() {
-        // Scala reads each of these as one expression.
+    fn misparsed_continuation_lines_are_flagged() {
+        // Scala reads `f(a)` and `return if c then 1 else 2`; tree-sitter-scala
+        // 0.26.4 starts a statement on each deeper line.
+        let call = problems("object O:\n  def g =\n    f\n      (a)\n");
+        assert_eq!(
+            call[1],
+            (
+                SyntaxKind::IndentedBlock,
+                Some(RegionProblem::MixedIndentation)
+            )
+        );
+        let ret = problems("object O:\n  def h: Int =\n    return\n      if c then 1 else 2\n");
+        assert_eq!(
+            ret[1],
+            (
+                SyntaxKind::IndentedBlock,
+                Some(RegionProblem::MixedIndentation)
+            )
+        );
+    }
+
+    #[test]
+    fn infix_operators_over_lines_are_read_whole() {
+        // tree-sitter-scala 0.26.3 split these; 0.26.4 reads each as one
+        // expression, as Scala does.
         let trailing = problems("object O:\n  def g =\n    a getOrElse\n      b\n");
-        assert_eq!(
-            trailing[1],
-            (
-                SyntaxKind::IndentedBlock,
-                Some(RegionProblem::MixedIndentation)
-            )
-        );
+        assert_eq!(trailing[1], (SyntaxKind::IndentedBlock, None));
         let leading = problems("object O:\n  def s =\n    a == 0\n    ||\n      b\n");
-        assert_eq!(
-            leading[1],
-            (
-                SyntaxKind::IndentedBlock,
-                Some(RegionProblem::MixedIndentation)
-            )
-        );
+        assert_eq!(leading[1], (SyntaxKind::IndentedBlock, None));
     }
 
     #[test]
@@ -413,8 +424,8 @@ mod tests {
 
     #[test]
     fn misattached_end_marker_flags_its_region() {
-        // Inside braces, tree-sitter-scala attaches `end match` to the `if`.
-        let source = "object O:\n  def f(v: V) = log(\"x\") {\n    v match\n    case r: R =>\n      if a then\n        b\n      else\n        c\n    end match\n  }\n";
+        // `end g` names a different definition from the one it closes.
+        let source = "object O:\n  def f =\n    1\n  end g\n";
         let parse = parse(source);
         let marker = parse
             .syntax()

@@ -296,12 +296,12 @@ mod tests {
 
     #[test]
     fn unsafe_regions_are_verbatim_and_swallow_nested_ranges() {
-        let source = "object O:\n  def g =\n    a getOrElse\n      b(\"s\")\n";
+        let source = "object O:\n  def g =\n    f\n      (\"s\")\n";
         let found = reasons(source);
         assert_eq!(
             found,
             [(
-                "a getOrElse\n      b(\"s\")\n",
+                "f\n      (\"s\")\n",
                 VerbatimReason::UnsafeIndentation(RegionProblem::MixedIndentation)
             )]
         );
