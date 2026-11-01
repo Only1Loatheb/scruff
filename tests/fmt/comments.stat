@@ -107,7 +107,7 @@ val y = x match {
 >>>
 val y = x match {
   case 1 /* one */ => a // first
-  case _ => /* other */ b
+  case _           => /* other */ b
 }
 
 <<< before a lambda arrow

@@ -1,0 +1,369 @@
+# `case` arrows aligned, as scalafmt's default `align.preset = some`: in each
+# run of one-line clauses on consecutive lines at one indentation, the `=>`
+# line up after the longest pattern, as long as every line stays in the
+# width. A clause whose body goes on to later lines aligns its first line and
+# ends the run; so does a blank line or a comment.
+#
+# Cases whose titles end with a source file and line are copied from
+# scalafmt (Apache-2.0), commit e1f0c2d, scalafmt-tests/shared/src/test/resources/.
+# Those marked SKIP need more than alignment; their settings say what.
+maxColumn = 80
+
+<<< arrows line up after the longest pattern
+x match {
+  case Some(value) => value
+  case None => 0
+}
+>>>
+x match {
+  case Some(value) => value
+  case None        => 0
+}
+
+<<< guards count as part of the pattern
+x match {
+  case n if n > 0 => "positive"
+  case 0 => "zero"
+  case _ => "negative"
+}
+>>>
+x match {
+  case n if n > 0 => "positive"
+  case 0          => "zero"
+  case _          => "negative"
+}
+
+<<< a blank line starts a new run
+x match {
+  case Some(value) => value
+
+  case None => 0
+  case _ => -1
+}
+>>>
+x match {
+  case Some(value) => value
+
+  case None => 0
+  case _    => -1
+}
+
+<<< a comment starts a new run
+x match {
+  case Some(value) => value
+  // the rest
+  case None => 0
+}
+>>>
+x match {
+  case Some(value) => value
+  // the rest
+  case None => 0
+}
+
+<<< a clause over several lines aligns its first line, then ends the run
+x match {
+  case 1 => one
+  case 22 =>
+    two
+  case 333 => three
+  case 4 => four
+}
+>>>
+x match {
+  case 1  => one
+  case 22 =>
+    two
+  case 333 => three
+  case 4   => four
+}
+
+<<< Scala 3 indented cases
+def f(x: Option[Int]) =
+  x match
+    case Some(value) => value
+    case None => 0
+>>>
+def f(x: Option[Int]) =
+  x match
+    case Some(value) => value
+    case None        => 0
+
+<<< a partial function in braces
+val ys = xs.collect {
+  case Some(value) => value
+  case None => 0
+}
+>>>
+val ys = xs.collect {
+  case Some(value) => value
+  case None        => 0
+}
+
+<<< a trailing comment counts toward the width, as in scalafmt
+x match {
+  case Some(value) => value
+  case Some(value: Long) => compute(value)
+  case None => 0 // a comment that would run past the width if padded
+}
+>>>
+x match {
+  case Some(value)       => value
+  case Some(value: Long) => compute(value)
+  case None => 0 // a comment that would run past the width if padded
+}
+
+<<< a clause that would go past the width starts a new group
+maxColumn = 40
+===
+x match {
+  case Some(value) => value
+  case None => compute(alpha, beta, g)
+  case _ => 1
+}
+>>>
+x match {
+  case Some(value) => value
+  case None => compute(alpha, beta, g)
+  case _    => 1
+}
+
+<<< clauses on one line are left alone
+val y = x match { case 1 => "one"; case _ => "other" }
+>>>
+val y = x match { case 1 => "one"; case _ => "other" }
+
+<<< SKIP match with dot complex (scala3/Match.stat:14)
+# scuff doesn't yet: needs select chains written over several lines, and cases at inconsistent widths, laid out.
+===
+def mtch(int: Int): String =
+            int.hello().thisIsALongMethodName().match {
+             case 1 => "1"
+              case _ => "ERR"
+            }.thisIsALongMethodName().thisIsALongMethodName().match {
+              case "1" => 1
+              case _ => 0
+            }
+>>>
+def mtch(int: Int): String =
+  int
+    .hello()
+    .thisIsALongMethodName()
+    .match {
+      case 1 => "1"
+      case _ => "ERR"
+    }
+    .thisIsALongMethodName()
+    .thisIsALongMethodName()
+    .match {
+      case "1" => 1
+      case _   => 0
+    }
+
+<<< SKIP match with dot complex inside (scala3/Match.stat:38)
+# scuff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
+maxColumn = 50
+===
+def mtch(int: Int): String =
+            int.hello().match {
+              case a =>
+                a.thisIsALongMethodName().thisIsALongMethodName().match {
+              case "1" => 1
+              case _ => 0
+            }
+            }
+>>>
+def mtch(int: Int): String =
+  int.hello().match { case a =>
+    a.thisIsALongMethodName()
+      .thisIsALongMethodName()
+      .match {
+        case "1" => 1
+        case _   => 0
+      }
+  }
+
+<<< SKIP select with dot complex inside (scala3/Match.stat:59)
+# scuff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
+maxColumn = 50
+===
+def mtch(int: Int): String =
+            int.hello().matc {
+              case a =>
+                a.thisIsALongMethodName().thisIsALongMethodName().matc {
+              case "1" => 1
+              case _ => 0
+            }
+            }
+>>>
+def mtch(int: Int): String =
+  int.hello().matc { case a =>
+    a.thisIsALongMethodName()
+      .thisIsALongMethodName()
+      .matc {
+        case "1" => 1
+        case _   => 0
+      }
+  }
+
+<<< SKIP match chain complex (scala3/Match.stat:80)
+# tree-sitter-scala can't parse an infix call on a match: `} startsWith "empty"`.
+===
+val hello = xs match {
+  case Nil => "empty"
+   case x :: xs1 => "nonempty"
+} startsWith "empty" match {
+   case true => 0
+    case false => 1
+}
+>>>
+val hello = xs match {
+  case Nil      => "empty"
+  case x :: xs1 => "nonempty"
+} startsWith "empty" match {
+  case true  => 0
+  case false => 1
+}
+
+<<< SKIP infix chain complex (scala3/Match.stat:96)
+# tree-sitter-scala can't parse an infix call on a match: `} startsWith "empty"`.
+===
+val hello = xs match {
+  case Nil => "empty"
+   case x :: xs1 => "nonempty"
+} startsWith "empty" match {
+   case true => 0
+    case false => 1
+}
+>>>
+val hello = xs match {
+  case Nil      => "empty"
+  case x :: xs1 => "nonempty"
+} startsWith "empty" match {
+  case true  => 0
+  case false => 1
+}
+
+<<< match chain (scala3/Match.stat:112)
+xs match {
+  case Nil => "empty"
+  case x :: xs1 => "nonempty"
+} match {
+  case "empty" => 0
+  case "nonempty" => 1
+}
+>>>
+xs match {
+  case Nil      => "empty"
+  case x :: xs1 => "nonempty"
+} match {
+  case "empty"    => 0
+  case "nonempty" => 1
+}
+
+<<< simple pattern (scala3/Macro.stat:70)
+   body match    {  
+      case '{ sum() } => Expr(0)
+      case '{ sum($n) } =>        n
+      case '{ sum(${Varargs(args)}: _*) } => sumExpr(args)
+      case body => body
+   }
+>>>
+body match {
+  case '{ sum() }                       => Expr(0)
+  case '{ sum($n) }                     => n
+  case '{ sum(${ Varargs(args) }: _*) } => sumExpr(args)
+  case body                             => body
+}
+
+<<< complex (scala3/InlineTransparent.stat:94)
+inline def repro[T <: Int with Singleton  ,   U <: Int with Singleton]: Int = 
+  inline erasedValue[T] match
+     case _: 5 => 5
+     case _: 6 =>
+       inline erasedValue[T] < erasedValue[U] match
+         case _: true => 100
+         case _: false => 101
+     case _    => 0
+>>>
+inline def repro[T <: Int with Singleton, U <: Int with Singleton]: Int =
+  inline erasedValue[T] match
+    case _: 5 => 5
+    case _: 6 =>
+      inline erasedValue[T] < erasedValue[U] match
+        case _: true  => 100
+        case _: false => 101
+    case _ => 0
+
+<<< simple match type (scala3/MatchType.stat:2)
+type Elem[X] = X match {
+             case String => Char
+             case Array[t] => t
+}
+>>>
+type Elem[X] = X match {
+  case String   => Char
+  case Array[t] => t
+}
+
+<<< SKIP recursive match type (scala3/MatchType.stat:22)
+# scuff doesn't yet: moves a `}` after the last clause onto its own line.
+===
+type Len[X] <: Int = X match {
+           case Unit => 0
+           case x *: xs => S[Len[xs]]}
+>>>
+type Len[X] <: Int = X match {
+  case Unit    => 0
+  case x *: xs => S[Len[xs]]
+}
+
+<<< SKIP pattern match (scala3/Vararg.stat:10)
+# scuff doesn't yet: moves clauses after `{` and before `}` onto lines of their own.
+===
+a match {case List(xs*) => 1 
+case Nil => 2}
+>>>
+a match {
+  case List(xs*) => 1
+  case Nil       => 2
+}
+
+<<< SKIP typed pat scalafmt/issues/2424 (scala3/Issues.stat:10)
+# scuff doesn't yet: re-indents code whose indentation is inconsistent.
+===
+  def f(s: String): Double =
+   val re =  """.*(\d+).*""".r
+    s match
+         case re(v): String => v.toDouble
+         case _ => 0.0
+>>>
+def f(s: String): Double =
+  val re = """.*(\d+).*""".r
+  s match
+    case re(v): String => v.toDouble
+    case _             => 0.0
+
+<<< SKIP issue 1509 (test/Issue1509.stat:2)
+# scuff doesn't yet: re-indents code whose indentation is inconsistent.
+maxColumn = 41
+===
+val x =
+if (true)
+  List() match {
+    case x :: xs => ???
+    case Nil => ???
+  }
+else {
+  2
+}
+>>>
+val x =
+  if (true)
+    List() match {
+      case x :: xs => ???
+      case Nil     => ???
+    }
+  else {
+    2
+  }

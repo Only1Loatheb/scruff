@@ -109,14 +109,18 @@ fn format_with(
     };
     let reindent = indent::Reindent::new(&parse);
     let reindented = !reindent.is_empty();
-    let formatted = print(&build_doc(&parse, rules, style, reindent), &print_options);
+    let width = options.max_width;
+    let formatted = print(
+        &build_doc(&parse, rules, style, width, reindent),
+        &print_options,
+    );
     match check_equivalent(source, &formatted) {
         Ok(()) => Ok(formatted),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&parse, rules, style, indent::Reindent::default());
+            let doc = build_doc(&parse, rules, style, width, indent::Reindent::default());
             let formatted = print(&doc, &print_options);
             check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
             Ok(formatted)
@@ -131,6 +135,7 @@ pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
         parse,
         Rules::Structural,
         STYLE,
+        FormatOptions::default().max_width,
         indent::Reindent::new(parse),
     )
 }
@@ -139,11 +144,13 @@ fn build_doc<'t>(
     parse: &'t Parse,
     rules: Rules,
     style: Style,
+    max_width: usize,
     reindent: indent::Reindent,
 ) -> Doc<'t> {
     let mut formatter = Formatter {
         parse,
         rules,
+        max_width,
         text: parse.syntax().text(),
         verbatim: parse.verbatim_ranges(),
         next_verbatim: 0,
@@ -184,6 +191,8 @@ fn build_doc<'t>(
 struct Formatter<'t> {
     parse: &'t Parse,
     rules: Rules,
+    /// The printer's width, for layout decided here, such as alignment.
+    max_width: usize,
     text: &'t str,
     verbatim: &'t [VerbatimRange],
     /// The first verbatim range that hasn't ended before the current
@@ -231,6 +240,14 @@ enum Piece {
 
 impl<'t> Formatter<'t> {
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        // Alignment is layout, like indentation, so the fallback has it too.
+        if matches!(
+            node.kind(),
+            SyntaxKind::CaseBlock | SyntaxKind::IndentedCases | SyntaxKind::MatchType
+        ) && let Some(doc) = self.aligned_cases(node)
+        {
+            return doc;
+        }
         if self.rules == Rules::Structural
             && let Some(doc) = self.structural(node)
         {
@@ -586,6 +603,140 @@ impl<'t> Formatter<'t> {
         Some((children[..arrow_at].to_vec(), arrow, *body))
     }
 
+    /// `case` clauses with their `=>` aligned, as scalafmt's default
+    /// `align.preset = some`: in each run of clauses on consecutive lines and
+    /// at the same indentation, the arrows line up after the longest
+    /// pattern. A clause whose body goes on to later lines joins the run
+    /// with its first line, and ends it. A blank line or a comment ends a run
+    /// too. Within a run, clauses join a group while its arrow column keeps
+    /// every line in the width; a clause that would push one over starts the
+    /// next group. `None` when no two clauses are next to each other.
+    fn aligned_cases(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let alignable: Vec<bool> = children.iter().map(alignable_clause).collect();
+        if !alignable.windows(2).any(|w| w[0] && w[1]) {
+            return None;
+        }
+
+        // Each child rendered; a clause in two parts, up to its `=>` and
+        // from it, each measured.
+        let mut parts = Vec::new();
+        for (child, alignable) in children.iter().zip(&alignable) {
+            let clause = match child {
+                NodeOrToken::Node(n) if *alignable => self.clause_parts(*n),
+                _ => None,
+            };
+            parts.push(match clause {
+                Some(clause) => Part::Clause(clause),
+                None => Part::Plain(self.element(*child)),
+            });
+        }
+
+        // Group the clauses and pad their arrows.
+        let mut padding = vec![0; parts.len()];
+        let mut group: Vec<usize> = Vec::new();
+        let mut column = 0;
+        for i in 0..parts.len() {
+            let Part::Clause(clause) = &parts[i] else {
+                group.clear();
+                continue;
+            };
+            if !clause.aligned {
+                group.clear();
+                continue;
+            }
+            let own = clause.indent + clause.before;
+            let wider = column.max(own);
+            let fits = |k: &usize| match &parts[*k] {
+                Part::Clause(c) => wider + c.after <= self.max_width,
+                Part::Plain(_) => true,
+            };
+            let continues = group.last().is_some_and(|&k| match &parts[k] {
+                Part::Clause(c) => !c.multi_line && c.indent == clause.indent,
+                Part::Plain(_) => false,
+            });
+            let joins =
+                continues && clause.adjacent && group.iter().chain(std::iter::once(&i)).all(fits);
+            if joins {
+                column = wider;
+                group.push(i);
+            } else {
+                group = vec![i];
+                column = own;
+            }
+            for &k in &group {
+                if let Part::Clause(c) = &parts[k] {
+                    padding[k] = column - (c.indent + c.before);
+                }
+            }
+        }
+        let docs = parts
+            .into_iter()
+            .zip(padding)
+            .map(|(part, pad)| match part {
+                Part::Plain(doc) => doc,
+                Part::Clause(c) => c.leading + c.head + Doc::text(" ".repeat(pad)) + c.tail,
+            });
+        Some(Doc::concat(docs))
+    }
+
+    /// A clause split at its `=>`, with the widths alignment needs. `None`
+    /// if it has no arrow, or what comes before it can't be printed on one
+    /// line.
+    fn clause_parts(&mut self, clause: SyntaxNode<'t>) -> Option<ClauseParts<'t>> {
+        let children: Vec<_> = clause.non_trivia_children().collect();
+        let arrow = children.iter().position(
+            |c| matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}")),
+        )?;
+        let first = first_code_token(&children[0])?;
+        let adjacent = !first.leading_trivia().any(|t| t.is_comment())
+            && first
+                .leading_trivia()
+                .filter(|t| t.kind() == TriviaKind::Newline)
+                .count()
+                == 1;
+        let indent = self
+            .reindent
+            .width(first.text_range().start())
+            .unwrap_or_else(|| first.indentation().len());
+        let leading = self.leading_of(clause);
+        let head = Doc::concat(children[..arrow].iter().map(|c| self.element(*c)));
+        let tail = Doc::concat(children[arrow..].iter().map(|c| self.element(*c)));
+        let before = head.flat_width()?;
+        // A body on later lines, or one too long for its line, which a rule
+        // will break: what counts is the arrow's line once broken, up to the
+        // body's first place to break. If even that doesn't fit, the head
+        // would break and lose its arrow, so the clause isn't aligned. That
+        // way a clause measures the same before and after it's broken.
+        // Whether the printer breaks the line ignores a trailing `//`
+        // comment, but alignment counts it, as scalafmt does: a clause isn't
+        // padded into a comment that then runs past the width.
+        let (after, multi_line, aligned) = match tail.flat_width() {
+            Some(width) if indent + before + width <= self.max_width => {
+                (tail.full_flat_width().unwrap_or(width), false, true)
+            }
+            _ => {
+                let first_line = tail.width_to_first_break();
+                (
+                    first_line,
+                    true,
+                    indent + before + first_line <= self.max_width,
+                )
+            }
+        };
+        Some(ClauseParts {
+            leading,
+            head,
+            tail,
+            indent,
+            before,
+            after,
+            adjacent,
+            multi_line,
+            aligned,
+        })
+    }
+
     /// The default rule: the node's code children in order, each token with
     /// its comments and whitespace.
     fn fallback(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
@@ -898,6 +1049,72 @@ impl<'t> Formatter<'t> {
             _ => Doc::text(text),
         }
     }
+}
+
+/// A child of a `case` clause list, rendered.
+enum Part<'t> {
+    Clause(ClauseParts<'t>),
+    Plain(Doc<'t>),
+}
+
+/// A one-line `case` clause, rendered in parts for alignment.
+struct ClauseParts<'t> {
+    /// The line break and indentation before it.
+    leading: Doc<'t>,
+    /// Up to the `=>`, with the space before it.
+    head: Doc<'t>,
+    /// From the `=>` on.
+    tail: Doc<'t>,
+    /// Its line's indentation, `head`'s width, and the width of `tail`'s
+    /// first line.
+    indent: usize,
+    before: usize,
+    after: usize,
+    /// Whether it's on the line right after the previous child: no blank
+    /// line or comment in between.
+    adjacent: bool,
+    /// Whether its body goes on to later lines, which ends its run.
+    multi_line: bool,
+    /// Whether it may be aligned at all.
+    aligned: bool,
+}
+
+/// Whether a child of a clause list can be aligned: a `case` clause that
+/// starts its line, with everything up to its `=>` on that line.
+fn alignable_clause(child: &SyntaxElement<'_>) -> bool {
+    let NodeOrToken::Node(clause) = child else {
+        return false;
+    };
+    if !matches!(
+        clause.kind(),
+        SyntaxKind::CaseClause | SyntaxKind::TypeCaseClause
+    ) {
+        return false;
+    }
+    let Some(arrow) = clause
+        .non_trivia_children()
+        .find(|c| matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}")))
+    else {
+        return false;
+    };
+    let head = usize::from(arrow.text_range().end() - clause.text_range().start());
+    first_code_token(child).is_some_and(|t| starts_line(&t))
+        && !clause.text()[..head].contains(['\n', '\r'])
+}
+
+/// The first token of an element that isn't trivia or missing.
+fn first_code_token<'t>(element: &SyntaxElement<'t>) -> Option<SyntaxToken<'t>> {
+    match element {
+        NodeOrToken::Token(token) => Some(*token).filter(|t| !t.is_trivia() && !t.is_missing()),
+        NodeOrToken::Node(node) => node.tokens().find(|t| !t.is_trivia() && !t.is_missing()),
+    }
+}
+
+/// Whether the token starts its line.
+fn starts_line(token: &SyntaxToken<'_>) -> bool {
+    token
+        .leading_trivia()
+        .any(|t| t.kind() == TriviaKind::Newline)
 }
 
 /// Whether `token` is in a statement of a template: the body of a class,

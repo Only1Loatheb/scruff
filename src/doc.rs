@@ -136,6 +136,74 @@ impl<'a> Doc<'a> {
     pub fn break_parent() -> Doc<'a> {
         Doc::BreakParent
     }
+
+    /// The width of this document up to its first place a line can break,
+    /// printed flat until there: what's left on a line when it breaks as
+    /// early as it can. A line suffix takes no width.
+    pub fn width_to_first_break(&self) -> usize {
+        fn walk(doc: &Doc<'_>, width: &mut usize) -> bool {
+            match doc {
+                Doc::Nil | Doc::LineSuffix(_) | Doc::BreakParent => false,
+                Doc::Text(text) => {
+                    *width += self::width(text);
+                    false
+                }
+                Doc::Verbatim(text) => match text.find(['\n', '\r']) {
+                    Some(i) => {
+                        *width += self::width(&text[..i]);
+                        true
+                    }
+                    None => {
+                        *width += self::width(text);
+                        false
+                    }
+                },
+                Doc::Line(_) => true,
+                Doc::Concat(parts) => parts.iter().any(|part| walk(part, width)),
+                Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+                    walk(inner, width)
+                }
+                Doc::IfBreak { flat, .. } => walk(flat, width),
+            }
+        }
+        let mut width = 0;
+        walk(self, &mut width);
+        width
+    }
+
+    /// The width of this document printed on one line, or `None` if it
+    /// can't be: it has a hard line break, or text with one. A line suffix,
+    /// such as a trailing `//` comment, takes no width.
+    pub fn flat_width(&self) -> Option<usize> {
+        self.flat_width_counting(false)
+    }
+
+    /// [`Doc::flat_width`] with line suffixes counted too: the whole line as
+    /// it reads.
+    pub fn full_flat_width(&self) -> Option<usize> {
+        self.flat_width_counting(true)
+    }
+
+    fn flat_width_counting(&self, suffixes: bool) -> Option<usize> {
+        match self {
+            Doc::LineSuffix(inner) if suffixes => inner.flat_width_counting(true),
+            Doc::Nil | Doc::LineSuffix(_) => Some(0),
+            Doc::Text(text) => Some(width(text)),
+            Doc::Verbatim(text) if text.contains(['\n', '\r']) => None,
+            Doc::Verbatim(text) => Some(width(text)),
+            Doc::Line(LineKind::Line) => Some(1),
+            Doc::Line(LineKind::Soft) => Some(0),
+            Doc::Line(LineKind::Hard) | Doc::BreakParent => None,
+            Doc::Concat(parts) => parts
+                .iter()
+                .map(|part| part.flat_width_counting(suffixes))
+                .sum(),
+            Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+                inner.flat_width_counting(suffixes)
+            }
+            Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
+        }
+    }
 }
 
 /// `a + b` concatenates, flattening nested concatenations.
@@ -529,6 +597,23 @@ mod tests {
         let doc = call("f", vec![t("日本語"), t("é")]);
         assert_eq!(at(9, &doc), "f(日本語, é)");
         assert_eq!(at(8, &doc), "f(\n  日本語,\n  é\n)");
+    }
+
+    #[test]
+    fn flat_width_measures_one_line() {
+        assert_eq!(call("f", vec![t("a"), t("bc")]).flat_width(), Some(8));
+        let comment = t(" // c").line_suffix();
+        assert_eq!((t("x") + comment.clone()).flat_width(), Some(1));
+        assert_eq!((t("x") + comment).full_flat_width(), Some(6));
+        assert_eq!((t("a") + Doc::hardline() + t("b")).flat_width(), None);
+        assert_eq!(Doc::verbatim("a\nb").flat_width(), None);
+    }
+
+    #[test]
+    fn width_to_first_break_stops_at_a_line() {
+        assert_eq!(call("f", vec![t("a"), t("bc")]).width_to_first_break(), 2);
+        assert_eq!((t("ab") + Doc::verbatim("c\nde")).width_to_first_break(), 3);
+        assert_eq!(t("abc").width_to_first_break(), 3);
     }
 
     #[test]

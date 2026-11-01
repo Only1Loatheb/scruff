@@ -33,7 +33,7 @@ object Main:
   def show(c: Color): String =
     c match
       case Color.Red => "red"
-      case _ => "other"
+      case _         => "other"
   end show
 end Main
 >>>
@@ -44,7 +44,7 @@ object Main:
   def show(c: Color): String =
     c match
       case Color.Red => "red"
-      case _ => "other"
+      case _         => "other"
   end show
 end Main
 

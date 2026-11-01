@@ -256,7 +256,12 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
             cases: node.kind() == SyntaxKind::IndentedCases,
         });
     }
-    let children: Vec<_> = node.non_trivia_children().collect();
+    let mut children: Vec<_> = node.non_trivia_children().collect();
+    // A match type's braces come after its scrutinee and `match`.
+    if node.kind() == SyntaxKind::MatchType {
+        let open = children.iter().position(|c| c.kind() == T!["{"])?;
+        children.drain(..open);
+    }
     let (NodeOrToken::Token(open), NodeOrToken::Token(close)) =
         (children.first()?, children.last()?)
     else {
