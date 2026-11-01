@@ -1,0 +1,15 @@
+[package]
+name = "ouf"
+version = "0.1.0"
+edition = "2024"
+description = "formatter"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+text-size = "1.1.1"
+tree-sitter = "0.27.1"
+tree-sitter-scala = "0.26.3"
+
+[profile.release]
+strip = true
+lto = true
