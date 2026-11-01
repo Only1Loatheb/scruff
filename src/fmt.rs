@@ -231,6 +231,33 @@ impl<'t> Formatter<'t> {
             }
         }
 
+        // A lambda alone in the arguments keeps its head with the `(` and
+        // breaks before its body instead, as in sbt's code: `f(x =>`, the
+        // body, then `)`.
+        let lambda = match items.as_slice() {
+            [item] if levels == 1 => match item.as_slice() {
+                [NodeOrToken::Node(node)] if node.kind() == SyntaxKind::LambdaExpression => {
+                    self.lambda_parts(*node)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((head, arrow, body)) = lambda {
+            let open = self.token_without_trailing(*open);
+            let mut docs: Vec<_> = head.into_iter().map(|e| self.element(e)).collect();
+            docs.push(self.token_without_trailing(arrow));
+            let body = (Doc::line() + self.element(body)).nest();
+            let close_text = self.token_without_trailing(*close);
+            let close_trailing = self.trailing(*close);
+            return Some(
+                open + (Doc::concat(docs) + body + Doc::softline() + close_text)
+                    .group()
+                    .from_line_indent()
+                    + close_trailing,
+            );
+        }
+
         let open = self.token_without_trailing(*open);
         let mut inner = vec![Doc::softline()];
         let mut commas = commas.into_iter();
@@ -256,6 +283,32 @@ impl<'t> Formatter<'t> {
                 .from_line_indent()
                 + close_trailing,
         )
+    }
+
+    /// A lambda split at its arrow: what comes before it, the arrow, and the
+    /// body. `None` when the gap after the arrow isn't one the spacing rules
+    /// put a space in, so the lambda printed flat matches the fallback.
+    #[allow(clippy::type_complexity)]
+    fn lambda_parts(
+        &self,
+        lambda: SyntaxNode<'t>,
+    ) -> Option<(Vec<SyntaxElement<'t>>, SyntaxToken<'t>, SyntaxElement<'t>)> {
+        let children: Vec<_> = lambda.non_trivia_children().collect();
+        let arrow_at = children.iter().position(|c| {
+            matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}"))
+        })?;
+        let NodeOrToken::Token(arrow) = children[arrow_at] else {
+            return None;
+        };
+        let [body] = &children[arrow_at + 1..] else {
+            return None;
+        };
+        let next = std::iter::successors(arrow.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())?;
+        if self.rule_between(&arrow, &next) != Some(true) {
+            return None;
+        }
+        Some((children[..arrow_at].to_vec(), arrow, *body))
     }
 
     /// The default rule: the node's code children in order, each token with

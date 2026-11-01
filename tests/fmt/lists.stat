@@ -132,3 +132,53 @@ def f =
     delta
   )
   x
+
+<<< a lambda alone in the arguments that fits stays on one line
+val ys = xs.map(x => x + 1)
+>>>
+val ys = xs.map(x => x + 1)
+
+<<< a lambda alone in the arguments breaks before its body
+val ys = xs.map(x => compute(x, alpha, b))
+>>>
+val ys = xs.map(x =>
+  compute(x, alpha, b)
+)
+
+<<< a lambda with parenthesized parameters
+val total = xs.foldLeft(0)((acc, x) => acc + x)
+>>>
+val total = xs.foldLeft(0)((acc, x) =>
+  acc + x
+)
+
+<<< a lambda after other arguments goes one per line with them
+val ys = transform(xs, x => x + 1, ys, zs)
+>>>
+val ys = transform(
+  xs,
+  x => x + 1,
+  ys,
+  zs
+)
+
+<<< a placeholder function is not a lambda
+val ys = xs.map(_ + somethingVeryLong12345)
+>>>
+val ys = xs.map(
+  _ + somethingVeryLong12345
+)
+
+<<< the body breaks further when it still doesn't fit
+val ys = xs.map(x => compute(x, alpha, beta, gamma, delta, eps))
+>>>
+val ys = xs.map(x =>
+  compute(
+    x,
+    alpha,
+    beta,
+    gamma,
+    delta,
+    eps
+  )
+)

@@ -14,7 +14,8 @@
 use std::fmt;
 
 use super::{
-    NodeOrToken, Parse, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, WalkEvent, parse,
+    NodeOrToken, Parse, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, WalkEvent,
+    parse,
 };
 
 /// The first way two texts differ.
@@ -152,11 +153,38 @@ impl Step<'_> {
 fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
     root.preorder_with_tokens().filter_map(|event| match event {
         WalkEvent::Enter(element) | WalkEvent::Leave(element) if element.is_trivia() => None,
+        WalkEvent::Enter(NodeOrToken::Node(node)) | WalkEvent::Leave(NodeOrToken::Node(node))
+            if is_transparent_block(&node) =>
+        {
+            None
+        }
         WalkEvent::Enter(NodeOrToken::Node(node)) => Some(Step::Enter(node)),
         WalkEvent::Leave(NodeOrToken::Node(node)) => Some(Step::Leave(node)),
         WalkEvent::Enter(NodeOrToken::Token(token)) => Some(Step::Token(token)),
         WalkEvent::Leave(NodeOrToken::Token(_)) => None,
     })
+}
+
+/// A lambda body that is an indented block holding one expression means the
+/// same as the expression alone: `x =>` with `a + 1` on the next line is
+/// `x => a + 1`. tree-sitter-scala wraps only the first in a block, so the
+/// block is skipped, which lets a formatter move a body to its own line.
+fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
+    if node.kind() != SyntaxKind::IndentedBlock
+        || !node
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression)
+    {
+        return false;
+    }
+    let mut children = node.non_trivia_children();
+    match (children.next(), children.next()) {
+        (Some(child), None) => {
+            let name = child.kind().name();
+            !(name.ends_with("_definition") || name.ends_with("_declaration"))
+        }
+        _ => false,
+    }
 }
 
 fn check_code(before: &Parse, after: &Parse) -> Result<(), Difference> {
@@ -305,6 +333,21 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn a_lambda_body_can_move_to_its_own_line() {
+        let one_line = "val a = f(x => x + 1)\n";
+        let two_lines = "val a = f(x =>\n  x + 1\n)\n";
+        assert_eq!(check_equivalent(one_line, two_lines), Ok(()));
+        assert_eq!(check_equivalent(two_lines, one_line), Ok(()));
+        // Only a block holding one expression: two statements are not one.
+        differs(
+            "val a = f(x => g(x))\n",
+            "val a = f(x =>\n  g(x)\n  h(x)\n)\n",
+        );
+        // Only a lambda body: a definition's block is still a block.
+        differs("def f = 1\n", "def f =\n  1\n");
     }
 
     #[test]
