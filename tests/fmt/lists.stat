@@ -182,3 +182,49 @@ val ys = xs.map(x =>
     eps
   )
 )
+
+<<< a lambda in braces that fits stays on one line
+val ys = xs.map { x => x + 1 }
+>>>
+val ys = xs.map { x => x + 1 }
+
+<<< a lambda in braces breaks before its body
+val ys = xs.map { x => compute(x, alpha, b) }
+>>>
+val ys = xs.map { x =>
+  compute(x, alpha, b)
+}
+
+<<< a boolean body in braces moves as a whole first
+val ys = xs.filter { x => x > lo && x < hi1 }
+>>>
+val ys = xs.filter { x =>
+  x > lo && x < hi1
+}
+
+<<< a body ending in a call, which keeps one space before the brace when flat
+val ys = xs.map { x => f(x, alpha, beta, gamma, delta) }
+val zs = xs.map { x => f(x) }
+>>>
+val ys = xs.map { x =>
+  f(x, alpha, beta, gamma, delta)
+}
+val zs = xs.map { x => f(x) }
+
+<<< case clauses are left alone; a block holding one expression breaks the same way
+val ys = xs.map { case (k, v) => k + v + other }
+val y = g { compute(alpha, beta, gamma, delta1) }
+>>>
+val ys = xs.map { case (k, v) => k + v + other }
+val y = g {
+  compute(alpha, beta, gamma, delta1)
+}
+
+<<< nested lambdas in braces: the outer one breaks first
+val a = reify { reify { x } }
+val ys = xs.flatMap { x => ys.map { y => combine(x, y) } }
+>>>
+val a = reify { reify { x } }
+val ys = xs.flatMap { x =>
+  ys.map { y => combine(x, y) }
+}

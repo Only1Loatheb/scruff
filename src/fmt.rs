@@ -97,6 +97,7 @@ fn build_doc<'t>(parse: &'t Parse, rules: Rules) -> Doc<'t> {
         next_verbatim: 0,
         copied_until: TextSize::from(0),
         leading_done: None,
+        trailing_skipped: Vec::new(),
     };
     let body = formatter.node(parse.syntax());
     let eof: Vec<_> = parse.eof_trivia().map(|t| formatter.trivia(t)).collect();
@@ -118,6 +119,9 @@ struct Formatter<'t> {
     /// Where the token starts whose leading trivia a rule already printed,
     /// ahead of a group that must not contain its line break.
     leading_done: Option<TextSize>,
+    /// Where the tokens start whose trailing gap a rule prints itself, such
+    /// as the line break before a `}`. Nested rules can each add one.
+    trailing_skipped: Vec<TextSize>,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -160,6 +164,7 @@ impl<'t> Formatter<'t> {
             SyntaxKind::Arguments => self.list(node, 1),
             SyntaxKind::Parameters | SyntaxKind::ClassParameters => self.list(node, 2),
             SyntaxKind::InfixExpression => self.infix(node),
+            SyntaxKind::Block => self.braced(node),
             _ => None,
         }
     }
@@ -263,6 +268,68 @@ impl<'t> Formatter<'t> {
         let close_trailing = self.trailing(*close);
         Some(
             open + (inner + Doc::softline() + close_text)
+                .group()
+                .from_line_indent()
+                + close_trailing,
+        )
+    }
+
+    /// A block in braces holding one expression, such as `g { f(x) }` or
+    /// `xs.map { x => f(x) }`: on one line if it fits, otherwise the
+    /// expression goes on the next line indented 2 spaces and `}` on its own
+    /// line, as in sbt's code. A lambda keeps `{ x =>` on the first line.
+    fn braced(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        if !self.can_break(node) {
+            return None;
+        }
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let [NodeOrToken::Token(open), inner, NodeOrToken::Token(close)] = children.as_slice()
+        else {
+            return None;
+        };
+        let name = inner.kind().name();
+        if open.text() != "{"
+            || close.text() != "}"
+            || name.ends_with("_definition")
+            || name.ends_with("_declaration")
+        {
+            return None;
+        }
+        // The spaces inside the braces must be ones the spacing rules put
+        // there, so the block printed flat matches the fallback.
+        let first = std::iter::successors(open.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())?;
+        let last = std::iter::successors(close.prev_token(), SyntaxToken::prev_token)
+            .find(|t| !t.is_trivia())?;
+        if self.rule_between(open, &first) != Some(true)
+            || self.rule_between(&last, close) != Some(true)
+        {
+            return None;
+        }
+        let lambda = match inner {
+            NodeOrToken::Node(n) if n.kind() == SyntaxKind::LambdaExpression => {
+                Some(self.lambda_parts(*n)?)
+            }
+            _ => None,
+        };
+
+        let open = self.token_without_trailing(*open);
+        let mut docs = Vec::new();
+        let body = match lambda {
+            Some((head, arrow, body)) => {
+                docs.push(Doc::text(" "));
+                docs.extend(head.into_iter().map(|e| self.element(e)));
+                docs.push(self.token_without_trailing(arrow));
+                body
+            }
+            None => *inner,
+        };
+        self.trailing_skipped.push(last.text_range().start());
+        let body = (Doc::line() + self.element(body)).nest();
+        let close_text = self.token_without_trailing(*close);
+        let close_trailing = self.trailing(*close);
+        Some(
+            open + (Doc::concat(docs) + body + Doc::line() + close_text)
                 .group()
                 .from_line_indent()
                 + close_trailing,
@@ -432,6 +499,11 @@ impl<'t> Formatter<'t> {
     /// The token's trailing trivia: the gap up to the next token on its line,
     /// or the rest of the line.
     fn trailing(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
+        let start = token.text_range().start();
+        if let Some(i) = self.trailing_skipped.iter().position(|&s| s == start) {
+            self.trailing_skipped.swap_remove(i);
+            return Doc::Nil;
+        }
         let mut docs = Vec::new();
         let trailing: Vec<_> = token.trailing_trivia().collect();
         let next = std::iter::successors(token.next_token(), SyntaxToken::next_token)
