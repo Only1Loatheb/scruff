@@ -1,0 +1,82 @@
+# Infix chains: on one line if they fit, otherwise broken after each
+# operator, with the operands after the first indented 2 spaces from the
+# line the chain starts on, as in sbt's code.
+maxColumn = 40
+
+<<< a chain that fits stays on one line
+val ok = alpha && beta && gamma
+>>>
+val ok = alpha && beta && gamma
+
+<<< a chain that doesn't fit breaks after each operator
+val ok = alpha && beta && gamma && delta1
+>>>
+val ok = alpha &&
+  beta &&
+  gamma &&
+  delta1
+
+<<< only the loosest operators break; tighter ones stay together
+val ok = alpha == beta || gamma == delta1
+>>>
+val ok = alpha == beta ||
+  gamma == delta1
+
+<<< && inside || stays together when it fits on its line
+val ok = alpha && beta || gamma && delta && eps
+>>>
+val ok = alpha && beta ||
+  gamma && delta && eps
+
+<<< other operators don't break, as in scalafmt with sbt's settings
+val xs = alpha :: beta :: gamma :: delta :: Nil
+val m = "org.example" % "artifact-name" % "1.0.0"
+val s = "a" + alpha + "b" + beta + "c" + gamma1
+>>>
+val xs = alpha :: beta :: gamma :: delta :: Nil
+val m = "org.example" % "artifact-name" % "1.0.0"
+val s = "a" + alpha + "b" + beta + "c" + gamma1
+
+<<< a boolean chain inside another expression breaks on its own
+val n = count + (alpha && beta && gamma && delta)
+>>>
+val n = count + (alpha &&
+  beta &&
+  gamma &&
+  delta)
+
+<<< a trailing comment doesn't count toward the width
+val ok = alpha && beta // a long comment that goes on
+>>>
+val ok = alpha && beta // a long comment that goes on
+
+<<< an alphanumeric operator doesn't break yet
+val x = first getOrElse second getOrElse third1
+>>>
+val x = first getOrElse second getOrElse third1
+
+<<< inside an argument list
+assert(alpha && beta && gamma && delta && eps)
+>>>
+assert(
+  alpha && beta && gamma && delta && eps
+)
+
+<<< indentation starts from the line the chain is on
+object A {
+  def ok = alpha && beta && gamma && delta
+}
+>>>
+object A {
+  def ok = alpha &&
+    beta &&
+    gamma &&
+    delta
+}
+
+<<< a chain written over several lines keeps its line breaks
+val ok = alpha &&
+    beta && gamma
+>>>
+val ok = alpha &&
+    beta && gamma

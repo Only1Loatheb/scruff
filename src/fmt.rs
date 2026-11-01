@@ -96,6 +96,7 @@ fn build_doc<'t>(parse: &'t Parse, rules: Rules) -> Doc<'t> {
         verbatim: parse.verbatim_ranges(),
         next_verbatim: 0,
         copied_until: TextSize::from(0),
+        leading_done: None,
     };
     let body = formatter.node(parse.syntax());
     let eof: Vec<_> = parse.eof_trivia().map(|t| formatter.trivia(t)).collect();
@@ -114,6 +115,9 @@ struct Formatter<'t> {
     next_verbatim: usize,
     /// End of the last verbatim range copied; source before it is done.
     copied_until: TextSize,
+    /// Where the token starts whose leading trivia a rule already printed,
+    /// ahead of a group that must not contain its line break.
+    leading_done: Option<TextSize>,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -155,6 +159,7 @@ impl<'t> Formatter<'t> {
             // in scalafmt's `indent.callSite` and `indent.defnSite`.
             SyntaxKind::Arguments => self.list(node, 1),
             SyntaxKind::Parameters | SyntaxKind::ClassParameters => self.list(node, 2),
+            SyntaxKind::InfixExpression => self.infix(node),
             _ => None,
         }
     }
@@ -166,19 +171,9 @@ impl<'t> Formatter<'t> {
     /// Only for a list written on one line with no comments. A list over
     /// several lines keeps its line breaks until indentation is handled.
     fn list(&mut self, node: SyntaxNode<'t>, levels: usize) -> Option<Doc<'t>> {
-        let range = node.text_range();
-        if node.text().contains(['\n', '\r']) || !self.free_at(range.start()) {
+        if !self.can_break(node) {
             return None;
         }
-        // Broken lines are indented from the line's indentation, so it must
-        // be code, not the inside of a string or comment.
-        let line_start = self.text[..usize::from(range.start())]
-            .rfind(['\n', '\r'])
-            .map_or(0, |i| i + 1);
-        if !self.free_at(TextSize::try_from(line_start).ok()?) {
-            return None;
-        }
-
         let children: Vec<_> = node.non_trivia_children().collect();
         let (NodeOrToken::Token(open), NodeOrToken::Token(close)) =
             (children.first()?, children.last()?)
@@ -186,17 +181,6 @@ impl<'t> Formatter<'t> {
             return None;
         };
         if open.text() != "(" || close.text() != ")" || children.len() < 3 {
-            return None;
-        }
-        let tokens: Vec<_> = node.tokens().filter(|t| !t.is_trivia()).collect();
-        let has_comment = tokens.iter().enumerate().any(|(i, t)| {
-            let leading = (i > 0).then(|| t.leading_trivia()).into_iter().flatten();
-            let trailing = (i + 1 < tokens.len()).then(|| t.trailing_trivia());
-            leading
-                .chain(trailing.into_iter().flatten())
-                .any(|t| t.is_comment())
-        });
-        if has_comment {
             return None;
         }
 
@@ -285,6 +269,73 @@ impl<'t> Formatter<'t> {
         )
     }
 
+    /// A boolean chain, such as `a && b && c`: on one line if it fits,
+    /// otherwise broken after each operator, with the operands after the
+    /// first indented 2 spaces, as in sbt's code. Only the operators at the
+    /// chain's own precedence break; an operand with operators that bind
+    /// tighter, like `a == b` in `a == b && c`, is a chain of its own.
+    ///
+    /// Only `&&` and `||` chains break. With sbt's configuration, scalafmt
+    /// never adds breaks inside other infix chains, such as `"org" % "name"
+    /// % "1.0"` or string concatenation, and leaves those lines long.
+    fn infix(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        if !self.can_break(node) {
+            return None;
+        }
+        let (mut operands, mut operators) = (Vec::new(), Vec::new());
+        flatten_infix(node, &mut operands, &mut operators)?;
+        for op in &operators {
+            if !matches!(op.text(), "&&" | "||") {
+                return None;
+            }
+            let next = std::iter::successors(op.next_token(), SyntaxToken::next_token)
+                .find(|t| !t.is_trivia())?;
+            if self.rule_between(op, &next) != Some(true) {
+                return None;
+            }
+        }
+        let leading = self.leading_of(node);
+        let mut operands = operands.into_iter();
+        let first = self.element(operands.next()?);
+        let mut rest = Vec::new();
+        for (op, operand) in operators.into_iter().zip(operands) {
+            rest.push(self.token_without_trailing(op));
+            rest.push(Doc::line());
+            rest.push(self.element(operand));
+        }
+        Some(
+            leading
+                + (first + Doc::concat(rest).nest())
+                    .group()
+                    .from_line_indent(),
+        )
+    }
+
+    /// Whether a rule may add line breaks inside `node`: it's written on one
+    /// line, has no comments inside, and starts a line of code, since broken
+    /// lines are indented from that line's indentation. Nodes over several
+    /// lines keep their breaks until indentation is handled.
+    fn can_break(&self, node: SyntaxNode<'t>) -> bool {
+        let range = node.text_range();
+        if node.text().contains(['\n', '\r']) || !self.free_at(range.start()) {
+            return false;
+        }
+        let line_start = self.text[..usize::from(range.start())]
+            .rfind(['\n', '\r'])
+            .map_or(0, |i| i + 1);
+        if !TextSize::try_from(line_start).is_ok_and(|start| self.free_at(start)) {
+            return false;
+        }
+        let tokens: Vec<_> = node.tokens().filter(|t| !t.is_trivia()).collect();
+        !tokens.iter().enumerate().any(|(i, t)| {
+            let leading = (i > 0).then(|| t.leading_trivia()).into_iter().flatten();
+            let trailing = (i + 1 < tokens.len()).then(|| t.trailing_trivia());
+            leading
+                .chain(trailing.into_iter().flatten())
+                .any(|t| t.is_comment())
+        })
+    }
+
     /// A lambda split at its arrow: what comes before it, the arrow, and the
     /// body. `None` when the gap after the arrow isn't one the spacing rules
     /// put a space in, so the lambda printed flat matches the fallback.
@@ -294,9 +345,9 @@ impl<'t> Formatter<'t> {
         lambda: SyntaxNode<'t>,
     ) -> Option<(Vec<SyntaxElement<'t>>, SyntaxToken<'t>, SyntaxElement<'t>)> {
         let children: Vec<_> = lambda.non_trivia_children().collect();
-        let arrow_at = children.iter().position(|c| {
-            matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}"))
-        })?;
+        let arrow_at = children.iter().position(
+            |c| matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}")),
+        )?;
         let NodeOrToken::Token(arrow) = children[arrow_at] else {
             return None;
         };
@@ -332,10 +383,39 @@ impl<'t> Formatter<'t> {
     /// The token with its leading trivia.
     fn token_without_trailing(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
         let mut docs = Vec::new();
-        let leading: Vec<_> = token.leading_trivia().collect();
-        self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
+        if self.leading_done == Some(token.text_range().start()) {
+            self.leading_done = None;
+        } else {
+            docs.push(self.leading(token));
+        }
         docs.push(self.source(token.text_range(), Piece::Code));
         Doc::concat(docs)
+    }
+
+    /// The token's leading trivia: line breaks, indentation and comments
+    /// before it.
+    fn leading(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
+        let mut docs = Vec::new();
+        let leading: Vec<_> = token.leading_trivia().collect();
+        self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
+        Doc::concat(docs)
+    }
+
+    /// The leading trivia of the node's first token, printed now so that a
+    /// group around the node doesn't contain its line break.
+    fn leading_of(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        let Some(first) = std::iter::successors(node.first_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())
+        else {
+            return Doc::Nil;
+        };
+        // A rule around this one already printed it.
+        if self.leading_done == Some(first.text_range().start()) {
+            return Doc::Nil;
+        }
+        let doc = self.leading(first);
+        self.leading_done = Some(first.text_range().start());
+        doc
     }
 
     /// Whether the spacing rules put a space between two tokens on the same
@@ -410,10 +490,18 @@ impl<'t> Formatter<'t> {
                 // Within a line: the space, if any, depends on what's around it.
                 TriviaKind::Whitespace => {}
                 TriviaKind::LineComment | TriviaKind::BlockComment => {
-                    if matches!(before, Gap::AfterCode | Gap::AfterComment) && self.free_at(start) {
-                        docs.push(Doc::text(" "));
+                    let after_code = matches!(before, Gap::AfterCode | Gap::AfterComment);
+                    let mut comment = Doc::Nil;
+                    if after_code && self.free_at(start) {
+                        comment = Doc::text(" ");
                     }
-                    docs.push(self.trivia(t));
+                    comment = comment + self.trivia(t);
+                    // A `//` comment after code takes no width, as in scalafmt,
+                    // so a long one doesn't make the code on its line break.
+                    if after_code && t.kind() == TriviaKind::LineComment && self.is_free(start) {
+                        comment = comment.line_suffix();
+                    }
+                    docs.push(comment);
                     before = Gap::AfterComment;
                 }
             }
@@ -499,6 +587,74 @@ impl<'t> Formatter<'t> {
             _ if text.contains(['\n', '\r']) => Doc::verbatim(text),
             _ => Doc::text(text),
         }
+    }
+}
+
+/// The operands and operators of an infix chain at one precedence, in
+/// order. Nested chains at the same precedence on the associative side are
+/// merged: the left one for most operators, the right one for operators
+/// ending in `:`, such as `a :: b :: c`.
+fn flatten_infix<'t>(
+    node: SyntaxNode<'t>,
+    operands: &mut Vec<SyntaxElement<'t>>,
+    operators: &mut Vec<SyntaxToken<'t>>,
+) -> Option<()> {
+    let field = |name: &str| {
+        node.non_trivia_children()
+            .find(|c| c.field_name() == Some(name))
+    };
+    let (left, NodeOrToken::Token(op), right) =
+        (field("left")?, field("operator")?, field("right")?)
+    else {
+        return None;
+    };
+    let level = precedence(op.text());
+    let right_assoc = op.text().ends_with(':');
+    let same = |e: &SyntaxElement<'t>| match e {
+        NodeOrToken::Node(n) if n.kind() == SyntaxKind::InfixExpression => n
+            .non_trivia_children()
+            .find(|c| c.field_name() == Some("operator"))
+            .is_some_and(|o| match o {
+                NodeOrToken::Token(t) => {
+                    precedence(t.text()) == level && t.text().ends_with(':') == right_assoc
+                }
+                NodeOrToken::Node(_) => false,
+            }),
+        _ => false,
+    };
+    match left {
+        NodeOrToken::Node(n) if !right_assoc && same(&left) => {
+            flatten_infix(n, operands, operators)?
+        }
+        _ => operands.push(left),
+    }
+    operators.push(op);
+    match right {
+        NodeOrToken::Node(n) if right_assoc && same(&right) => {
+            flatten_infix(n, operands, operators)?
+        }
+        _ => operands.push(right),
+    }
+    Some(())
+}
+
+/// How tightly an infix operator binds, lowest first (SLS 6.12.3).
+fn precedence(op: &str) -> u8 {
+    // An assignment operator, such as `+=`, binds loosest.
+    if op.ends_with('=') && !op.starts_with('=') && !matches!(op, "<=" | ">=" | "!=") {
+        return 0;
+    }
+    match op.chars().next() {
+        Some('|') => 2,
+        Some('^') => 3,
+        Some('&') => 4,
+        Some('=' | '!') => 5,
+        Some('<' | '>') => 6,
+        Some(':') => 7,
+        Some('+' | '-') => 8,
+        Some('*' | '/' | '%') => 9,
+        Some(c) if c.is_alphanumeric() || c == '_' || c == '`' || c == '$' => 1,
+        _ => 10,
     }
 }
 
