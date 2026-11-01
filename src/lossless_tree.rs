@@ -1199,12 +1199,12 @@ object Main extends App {
 /// submodules), or under `$OUF_CORPUS` if set. Run with:
 /// `cargo test --release corpus -- --ignored --nocapture`
 #[cfg(test)]
-mod corpus {
+pub(crate) mod corpus {
     use super::*;
     use std::path::{Path, PathBuf};
 
     /// The `.scala` files under `$OUF_CORPUS`, or under `modules/`.
-    fn corpus_files() -> Vec<PathBuf> {
+    pub(crate) fn corpus_files() -> Vec<PathBuf> {
         let root = std::env::var_os("OUF_CORPUS")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("modules"));

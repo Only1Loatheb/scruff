@@ -161,6 +161,8 @@ pub struct PrintOptions {
     pub max_width: usize,
     /// One level of indentation.
     pub indent: String,
+    /// What a line break prints as, such as `"\n"` or `"\r\n"`.
+    pub line_ending: String,
 }
 
 impl Default for PrintOptions {
@@ -168,6 +170,7 @@ impl Default for PrintOptions {
         PrintOptions {
             max_width: 100,
             indent: "  ".to_string(),
+            line_ending: "\n".to_string(),
         }
     }
 }
@@ -271,7 +274,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     }
                     let trimmed = out.trim_end_matches([' ', '\t']).len();
                     out.truncate(trimmed.max(verbatim_end));
-                    out.push('\n');
+                    out.push_str(&options.line_ending);
                     for _ in 0..indent {
                         out.push_str(&options.indent);
                     }
@@ -448,6 +451,16 @@ mod tests {
             ..PrintOptions::default()
         };
         assert_eq!(print(&doc, &tabs), "def f =\n\tval x = 1\n\tx\nend f");
+    }
+
+    #[test]
+    fn line_ending_is_configurable() {
+        let crlf = PrintOptions {
+            line_ending: "\r\n".to_string(),
+            ..PrintOptions::default()
+        };
+        let doc = t("a") + Doc::hardline() + t("b");
+        assert_eq!(print(&doc, &crlf), "a\r\nb");
     }
 
     #[test]
