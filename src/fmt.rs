@@ -54,7 +54,7 @@ impl std::error::Error for FormatError {}
 
 /// Formats Scala source.
 pub fn format(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
-    format_with(source, options, Rules::Structural)
+    format_with(source, options, Rules::Structural, STYLE)
 }
 
 /// Which rules build the document.
@@ -68,7 +68,36 @@ enum Rules {
     Fallback,
 }
 
-fn format_with(source: &str, options: &FormatOptions, rules: Rules) -> Result<String, FormatError> {
+/// Choices scuff makes for everyone, gathered in one place so they're easy
+/// to revisit. They aren't options: `format` always uses [`STYLE`], and
+/// tests may try others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Style {
+    /// Blank lines in a row, at most, between definitions in a template:
+    /// the body of a class, object, trait or enum, an extension's methods,
+    /// a package, or the file.
+    max_blank_lines_in_templates: usize,
+    /// Blank lines in a row, at most, anywhere else: in a block or a method
+    /// body, including between nested functions.
+    max_blank_lines_in_blocks: usize,
+}
+
+/// After Black, the Python formatter, which allows 2 blank lines between
+/// module-level definitions and 1 inside functions. Scala's templates play
+/// the part of Python's modules. sbt's code agrees: its runs of 2 in blocks
+/// are all in comments or `format: off` blocks, which are copied as
+/// written.
+const STYLE: Style = Style {
+    max_blank_lines_in_templates: 2,
+    max_blank_lines_in_blocks: 1,
+};
+
+fn format_with(
+    source: &str,
+    options: &FormatOptions,
+    rules: Rules,
+    style: Style,
+) -> Result<String, FormatError> {
     let parse = parse(source);
     if !parse.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(parse.errors().to_vec()));
@@ -80,14 +109,14 @@ fn format_with(source: &str, options: &FormatOptions, rules: Rules) -> Result<St
     };
     let reindent = indent::Reindent::new(&parse);
     let reindented = !reindent.is_empty();
-    let formatted = print(&build_doc(&parse, rules, reindent), &print_options);
+    let formatted = print(&build_doc(&parse, rules, style, reindent), &print_options);
     match check_equivalent(source, &formatted) {
         Ok(()) => Ok(formatted),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&parse, rules, indent::Reindent::default());
+            let doc = build_doc(&parse, rules, style, indent::Reindent::default());
             let formatted = print(&doc, &print_options);
             check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
             Ok(formatted)
@@ -98,10 +127,20 @@ fn format_with(source: &str, options: &FormatOptions, rules: Rules) -> Result<St
 
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
-    build_doc(parse, Rules::Structural, indent::Reindent::new(parse))
+    build_doc(
+        parse,
+        Rules::Structural,
+        STYLE,
+        indent::Reindent::new(parse),
+    )
 }
 
-fn build_doc<'t>(parse: &'t Parse, rules: Rules, reindent: indent::Reindent) -> Doc<'t> {
+fn build_doc<'t>(
+    parse: &'t Parse,
+    rules: Rules,
+    style: Style,
+    reindent: indent::Reindent,
+) -> Doc<'t> {
     let mut formatter = Formatter {
         parse,
         rules,
@@ -112,10 +151,32 @@ fn build_doc<'t>(parse: &'t Parse, rules: Rules, reindent: indent::Reindent) -> 
         leading_done: None,
         trailing_skipped: Vec::new(),
         reindent,
+        at_file_start: true,
+        line_breaks: 0,
+        style,
     };
     let body = formatter.node(parse.syntax());
-    let eof: Vec<_> = parse.eof_trivia().map(|t| formatter.trivia(t)).collect();
-    body + Doc::concat(eof)
+    // The file ends with its last code or comment and one line break, as in
+    // scalafmt, unless what's at the end is copied verbatim.
+    let mut eof: Vec<_> = parse.eof_trivia().collect();
+    while eof.last().is_some_and(|t| {
+        matches!(t.kind(), TriviaKind::Newline | TriviaKind::Whitespace)
+            && formatter.is_free(t.text_range().start())
+    }) {
+        eof.pop();
+    }
+    // Popping stopped at verbatim whitespace: its line breaks are kept.
+    let ends_verbatim = eof
+        .last()
+        .is_some_and(|t| matches!(t.kind(), TriviaKind::Newline | TriviaKind::Whitespace));
+    let mut docs = Vec::new();
+    formatter.trivia_within_lines(&mut docs, &eof, Gap::LineStart, None);
+    let end = if formatter.at_file_start || ends_verbatim {
+        Doc::Nil
+    } else {
+        Doc::hardline()
+    };
+    body + Doc::concat(docs) + end
 }
 
 /// Builds a [`Doc`] from the tree, copying verbatim ranges as they're
@@ -138,6 +199,12 @@ struct Formatter<'t> {
     trailing_skipped: Vec<TextSize>,
     /// New indentation for lines whose indentation changes.
     reindent: indent::Reindent,
+    /// Whether no code or comment has been printed yet: line breaks before
+    /// the first one are dropped.
+    at_file_start: bool,
+    /// Line breaks since the last code or comment.
+    line_breaks: usize,
+    style: Style,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -546,6 +613,8 @@ impl<'t> Formatter<'t> {
             docs.push(self.leading(token));
         }
         docs.push(self.source(token.text_range(), Piece::Code));
+        self.at_file_start = false;
+        self.line_breaks = 0;
         Doc::concat(docs)
     }
 
@@ -638,13 +707,38 @@ impl<'t> Formatter<'t> {
         mut before: Gap,
         next: Option<&SyntaxToken<'t>>,
     ) {
-        for &t in trivia {
+        for (i, &t) in trivia.iter().enumerate() {
             let start = t.text_range().start();
             match t.kind() {
                 TriviaKind::Newline => {
+                    if self.is_free(start) {
+                        self.line_breaks += 1;
+                        // The code after the line breaks decides how many blank
+                        // lines it may have before it. A comment between them
+                        // belongs to that code.
+                        let blank_lines = match next {
+                            Some(next) if !in_template(next) => {
+                                self.style.max_blank_lines_in_blocks
+                            }
+                            _ => self.style.max_blank_lines_in_templates,
+                        };
+                        // The line break ending a line, then the blank lines.
+                        if self.at_file_start || self.line_breaks > blank_lines + 1 {
+                            continue;
+                        }
+                    }
                     docs.push(self.trivia(t));
                     before = Gap::LineStart;
                 }
+                // A blank line's whitespace, which the printer would trim
+                // anyway. Keeping it would make it the next line's
+                // indentation when a line break between them is dropped.
+                TriviaKind::Whitespace
+                    if before == Gap::LineStart
+                        && self.is_free(start)
+                        && trivia
+                            .get(i + 1)
+                            .is_some_and(|t| t.kind() == TriviaKind::Newline) => {}
                 TriviaKind::Whitespace if before == Gap::LineStart && self.is_free(start) => {
                     match self.reindent.width(t.text_range().end()) {
                         Some(width) => docs.push(Doc::text(" ".repeat(width))),
@@ -671,6 +765,8 @@ impl<'t> Formatter<'t> {
                         comment = Doc::text(" ");
                     }
                     comment = comment + self.trivia(t);
+                    self.at_file_start = false;
+                    self.line_breaks = 0;
                     // A `//` comment after code takes no width, as in scalafmt,
                     // so a long one doesn't make the code on its line break.
                     if after_code && t.kind() == TriviaKind::LineComment && self.is_free(start) {
@@ -804,6 +900,27 @@ impl<'t> Formatter<'t> {
     }
 }
 
+/// Whether `token` is in a statement of a template: the body of a class,
+/// object, trait or enum, an extension's methods, a package, or the file.
+/// Otherwise it's in a block, a method body or `case` clauses.
+fn in_template(token: &SyntaxToken<'_>) -> bool {
+    for node in token.parent_ancestors() {
+        match node.kind() {
+            SyntaxKind::CompilationUnit
+            | SyntaxKind::TemplateBody
+            | SyntaxKind::EnumBody
+            | SyntaxKind::WithTemplateBody
+            | SyntaxKind::ExtensionDefinition => return true,
+            SyntaxKind::Block
+            | SyntaxKind::IndentedBlock
+            | SyntaxKind::IndentedCases
+            | SyntaxKind::CaseBlock => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
 /// The part of a select chain a node continues: the qualifier of a select,
 /// the function of a call, or the function given type arguments.
 fn chain_spine(node: SyntaxNode<'_>) -> Option<SyntaxElement<'_>> {
@@ -911,12 +1028,54 @@ mod tests {
     }
 
     #[test]
+    fn blank_lines_in_a_row_follow_the_style() {
+        let source = concat!(
+            "val a = 1\n\n\n\n\nobject B {\n  object C {\n    val c = 1\n\n\n\n    val d = 2\n  }\n\n\n\n",
+            "  def f = {\n    val x = 1\n\n\n\n    x\n  }\n}\n",
+        );
+        let options = FormatOptions::default();
+        let with = |templates, blocks| {
+            let style = Style {
+                max_blank_lines_in_templates: templates,
+                max_blank_lines_in_blocks: blocks,
+            };
+            format_with(source, &options, Rules::Structural, style).unwrap()
+        };
+        // Templates, nested or not, get the first limit; a method body the
+        // second.
+        assert_eq!(
+            with(2, 1),
+            concat!(
+                "val a = 1\n\n\nobject B {\n  object C {\n    val c = 1\n\n\n    val d = 2\n  }\n\n\n",
+                "  def f = {\n    val x = 1\n\n    x\n  }\n}\n",
+            )
+        );
+        assert_eq!(
+            with(1, 0),
+            concat!(
+                "val a = 1\n\nobject B {\n  object C {\n    val c = 1\n\n    val d = 2\n  }\n\n",
+                "  def f = {\n    val x = 1\n    x\n  }\n}\n",
+            )
+        );
+    }
+
+    #[test]
     fn edge_cases() {
         assert_eq!(fmt(""), "");
-        assert_eq!(fmt("\n\n"), "\n\n");
-        assert_eq!(fmt("// only a comment"), "// only a comment");
+        assert_eq!(fmt("\n\n"), "");
+        assert_eq!(fmt("// only a comment"), "// only a comment\n");
         assert_eq!(fmt("   "), "");
         assert_eq!(fmt("val x = 1\n  "), "val x = 1\n", "a last line of spaces");
+        assert_eq!(
+            fmt("val x = 1\n\n\n"),
+            "val x = 1\n",
+            "blank lines at the end"
+        );
+        assert_eq!(
+            fmt("val x = 1"),
+            "val x = 1\n",
+            "a missing final line break"
+        );
     }
 
     #[test]
@@ -933,8 +1092,8 @@ mod tests {
     }
 
     /// Formats every error-free file in the corpus, checking that each
-    /// result is equivalent, keeps every line break (rules only add them so
-    /// far), and is stable when formatted again. Run with:
+    /// result is equivalent, never joins lines with code (rules only add
+    /// line breaks so far), and is stable when formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
@@ -951,7 +1110,8 @@ mod tests {
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
         let (mut broken, mut lines_added) = (0, 0);
-        let lines = |s: &str| s.matches('\n').count();
+        // Lines with code or comments: rules add them but never join them.
+        let lines = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).count();
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
@@ -972,7 +1132,7 @@ mod tests {
                         lines_added += lines(&out) - lines(&source);
                     }
                     if lines(&out) < lines(&source) {
-                        failures.push(format!("{}: lost line breaks", path.display()));
+                        failures.push(format!("{}: joined lines", path.display()));
                     } else if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str())
                     {
                         failures.push(format!("{}: not idempotent", path.display()));
@@ -998,8 +1158,8 @@ mod tests {
         let options = FormatOptions {
             max_width: 1_000_000,
         };
-        let structural = format_with(source, &options, Rules::Structural);
-        let fallback = format_with(source, &options, Rules::Fallback);
+        let structural = format_with(source, &options, Rules::Structural, STYLE);
+        let fallback = format_with(source, &options, Rules::Fallback, STYLE);
         if structural == fallback {
             return None;
         }
