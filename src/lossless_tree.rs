@@ -8,11 +8,13 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
+pub use equivalence::{Difference, DifferenceKind, Location, check_equivalent};
 pub use syntax_kind::SyntaxKind;
 pub use text_size::{TextRange, TextSize};
 use tree_sitter::{Language, Parser};
 pub use trivia::{SyntaxTrivia, TriviaKind};
 
+mod equivalence;
 mod syntax_kind;
 mod trivia;
 
@@ -1202,6 +1204,58 @@ mod corpus {
                 out.push(path);
             }
         }
+    }
+
+    /// Doubles every run of spaces between two tokens on the same line,
+    /// leaving line breaks and indentation alone.
+    fn widen_spaces(source: &str) -> String {
+        let parse = parse(source);
+        let mut out = String::with_capacity(source.len() * 2);
+        for token in parse.syntax().tokens() {
+            out.push_str(token.text());
+            let start = usize::from(token.text_range().start());
+            let at_line_start = start == 0 || matches!(source.as_bytes()[start - 1], b'\n' | b'\r');
+            if token.kind() == SyntaxKind::Whitespace
+                && !token.is_extra()
+                && !token.text().contains(['\n', '\r'])
+                && !at_line_start
+            {
+                out.push_str(token.text());
+            }
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "needs OUF_CORPUS"]
+    fn corpus_widened_spaces_are_equivalent() {
+        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
+        let mut files = Vec::new();
+        scala_files(Path::new(&root), &mut files);
+        let (mut failures, mut skipped) = (Vec::new(), 0);
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            // tree-sitter's error recovery can change with spacing alone, so
+            // code with syntax errors isn't safe to reformat.
+            if !parse(&source).errors().is_empty() {
+                skipped += 1;
+                continue;
+            }
+            if let Err(difference) = check_equivalent(&source, &widen_spaces(&source)) {
+                failures.push(format!("{}: {difference}", path.display()));
+            }
+        }
+        for failure in failures.iter().take(10) {
+            println!("{failure}");
+        }
+        println!(
+            "{} files, {skipped} skipped for syntax errors, {} not equivalent",
+            files.len(),
+            failures.len()
+        );
+        assert!(failures.is_empty());
     }
 
     #[test]

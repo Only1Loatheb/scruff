@@ -187,7 +187,7 @@ impl<'t> SyntaxToken<'t> {
     }
 
     /// Code tokens own trivia; whitespace, comments and missing tokens don't.
-    fn owns_trivia(&self) -> bool {
+    pub(super) fn owns_trivia(&self) -> bool {
         !self.is_trivia() && !self.is_missing()
     }
 }
@@ -334,12 +334,26 @@ fn lex(root: SyntaxNode<'_>) -> Vec<Item> {
             let range = comment_range(token);
             if last_comment != Some(range) {
                 last_comment = Some(range);
-                let kind = if text[range].starts_with("//") {
+                // tree-sitter-scala sometimes includes neighboring spaces in
+                // a comment, depending on the code around it. Split them off
+                // so a comment's text doesn't change with its surroundings.
+                let comment = &text[range];
+                let body = comment.trim();
+                let body_start = range.start() + offset(comment.len() - comment.trim_start().len());
+                let body_range = TextRange::at(body_start, offset(body.len()));
+                let before = TextRange::new(range.start(), body_range.start());
+                let after = TextRange::new(body_range.end(), range.end());
+                split_whitespace(before, &text[before], &mut items);
+                let kind = if body.starts_with("//") {
                     TriviaKind::LineComment
                 } else {
                     TriviaKind::BlockComment
                 };
-                items.push(Item::Trivia(TriviaPiece { kind, range }));
+                items.push(Item::Trivia(TriviaPiece {
+                    kind,
+                    range: body_range,
+                }));
+                split_whitespace(after, &text[after], &mut items);
             }
         } else if token.kind() == SyntaxKind::Whitespace {
             split_whitespace(token.text_range(), &text[token.text_range()], &mut items);
@@ -554,6 +568,35 @@ mod tests {
                 .tokens()
                 .any(|t| t.text() == "}" && !t.is_trivia())
         );
+    }
+
+    #[test]
+    fn spaces_tree_sitter_puts_in_a_comment_are_split_off() {
+        // tree-sitter-scala parses the second comment as "/*c*/ ".
+        let source = "class A {\n  /*c*/ def a = x\n  /*c*/ def b = x\n}\n";
+        let parse = parse(source);
+        let in_tree: Vec<_> = parse
+            .syntax()
+            .tokens()
+            .filter(|t| t.kind() == SyntaxKind::BlockComment)
+            .map(|t| t.text())
+            .collect();
+        assert_eq!(
+            in_tree,
+            ["/*c*/", "/*c*/ "],
+            "tree-sitter changed; this test may be moot"
+        );
+        let defs: Vec<_> = parse
+            .syntax()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::FunctionDefinition)
+            .collect();
+        for def in defs {
+            assert_eq!(comments(def.leading_trivia()), ["/*c*/"]);
+            let last = def.leading_trivia().last().unwrap();
+            assert_eq!(last.kind(), TriviaKind::Whitespace);
+        }
+        assert_eq!(reassemble(&parse), source);
     }
 
     #[test]
