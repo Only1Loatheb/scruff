@@ -4,8 +4,9 @@ mod spacing;
 
 use crate::doc::{Doc, PrintOptions, print};
 use crate::lossless_tree::{
-    Difference, NodeOrToken, Parse, SyntaxElement, SyntaxError, SyntaxNode, SyntaxToken,
-    SyntaxTrivia, TextRange, TextSize, TriviaKind, VerbatimRange, check_equivalent, parse,
+    Difference, NodeOrToken, Parse, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode,
+    SyntaxToken, SyntaxTrivia, TextRange, TextSize, TriviaKind, VerbatimRange, check_equivalent,
+    parse,
 };
 
 /// Formatting is deliberately not configurable beyond this. Indentation is
@@ -147,12 +148,114 @@ impl<'t> Formatter<'t> {
         self.fallback(node)
     }
 
-    /// The node's own rule, if its kind has one. None yet.
-    #[allow(clippy::match_single_binding)] // until the first rule
+    /// The node's own rule, if its kind has one and it applies here.
     fn structural(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
         match node.kind() {
+            // sbt's style: arguments indent 2 spaces and parameters 4, as
+            // in scalafmt's `indent.callSite` and `indent.defnSite`.
+            SyntaxKind::Arguments => self.list(node, 1),
+            SyntaxKind::Parameters | SyntaxKind::ClassParameters => self.list(node, 2),
             _ => None,
         }
+    }
+
+    /// A parenthesized list, such as arguments or parameters: on one line if
+    /// it fits, otherwise one item per line, nested `levels` deep, with `)`
+    /// on its own line (scalafmt's `danglingParentheses`).
+    ///
+    /// Only for a list written on one line with no comments. A list over
+    /// several lines keeps its line breaks until indentation is handled.
+    fn list(&mut self, node: SyntaxNode<'t>, levels: usize) -> Option<Doc<'t>> {
+        let range = node.text_range();
+        if node.text().contains(['\n', '\r']) || !self.free_at(range.start()) {
+            return None;
+        }
+        // Broken lines are indented from the line's indentation, so it must
+        // be code, not the inside of a string or comment.
+        let line_start = self.text[..usize::from(range.start())]
+            .rfind(['\n', '\r'])
+            .map_or(0, |i| i + 1);
+        if !self.free_at(TextSize::try_from(line_start).ok()?) {
+            return None;
+        }
+
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let (NodeOrToken::Token(open), NodeOrToken::Token(close)) =
+            (children.first()?, children.last()?)
+        else {
+            return None;
+        };
+        if open.text() != "(" || close.text() != ")" || children.len() < 3 {
+            return None;
+        }
+        let tokens: Vec<_> = node.tokens().filter(|t| !t.is_trivia()).collect();
+        let has_comment = tokens.iter().enumerate().any(|(i, t)| {
+            let leading = (i > 0).then(|| t.leading_trivia()).into_iter().flatten();
+            let trailing = (i + 1 < tokens.len()).then(|| t.trailing_trivia());
+            leading
+                .chain(trailing.into_iter().flatten())
+                .any(|t| t.is_comment())
+        });
+        if has_comment {
+            return None;
+        }
+
+        // The items between `(` and `)`, split at commas.
+        let mut items = vec![Vec::new()];
+        let mut commas = Vec::new();
+        for child in &children[1..children.len() - 1] {
+            match child {
+                NodeOrToken::Token(t) if t.text() == "," => {
+                    commas.push(*t);
+                    items.push(Vec::new());
+                }
+                _ => items.last_mut().unwrap().push(*child),
+            }
+        }
+        // Empty items: a trailing comma, which needs `)` on the next line.
+        if items.iter().any(Vec::is_empty) {
+            return None;
+        }
+        // The gaps that become line breaks must be ones the spacing rules
+        // decide, so the list printed flat matches the fallback.
+        let first = std::iter::successors(open.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())?;
+        if self.rule_between(open, &first) != Some(false) {
+            return None;
+        }
+        for comma in &commas {
+            let next = std::iter::successors(comma.next_token(), SyntaxToken::next_token)
+                .find(|t| !t.is_trivia())?;
+            if self.rule_between(comma, &next) != Some(true) {
+                return None;
+            }
+        }
+
+        let open = self.token_without_trailing(*open);
+        let mut inner = vec![Doc::softline()];
+        let mut commas = commas.into_iter();
+        for (i, item) in items.into_iter().enumerate() {
+            if i > 0 {
+                let comma = commas.next().unwrap();
+                inner.push(self.token_without_trailing(comma));
+                inner.push(Doc::line());
+            }
+            for element in item {
+                inner.push(self.element(element));
+            }
+        }
+        let mut inner = Doc::concat(inner);
+        for _ in 0..levels {
+            inner = inner.nest();
+        }
+        let close_text = self.token_without_trailing(*close);
+        let close_trailing = self.trailing(*close);
+        Some(
+            open + (inner + Doc::softline() + close_text)
+                .group()
+                .from_line_indent()
+                + close_trailing,
+        )
     }
 
     /// The default rule: the node's code children in order, each token with
@@ -170,11 +273,33 @@ impl<'t> Formatter<'t> {
     }
 
     fn token(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
+        self.token_without_trailing(token) + self.trailing(token)
+    }
+
+    /// The token with its leading trivia.
+    fn token_without_trailing(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
         let mut docs = Vec::new();
         let leading: Vec<_> = token.leading_trivia().collect();
         self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
         docs.push(self.source(token.text_range(), Piece::Code));
+        Doc::concat(docs)
+    }
 
+    /// Whether the spacing rules put a space between two tokens on the same
+    /// line, or `None` if the gap is kept as written.
+    fn rule_between(&self, left: &SyntaxToken<'t>, right: &SyntaxToken<'t>) -> Option<bool> {
+        let gap = TextRange::new(left.text_range().end(), right.text_range().start());
+        if self.gap_is_free(gap) {
+            spacing::space_between(left, right)
+        } else {
+            None
+        }
+    }
+
+    /// The token's trailing trivia: the gap up to the next token on its line,
+    /// or the rest of the line.
+    fn trailing(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
+        let mut docs = Vec::new();
         let trailing: Vec<_> = token.trailing_trivia().collect();
         let next = std::iter::successors(token.next_token(), SyntaxToken::next_token)
             .find(|t| !t.is_trivia() && !t.is_missing());
@@ -182,13 +307,7 @@ impl<'t> Formatter<'t> {
         let only_spaces = trailing.iter().all(|t| t.kind() == TriviaKind::Whitespace);
         match next_on_this_line {
             Some(next) => {
-                let gap = TextRange::new(token.text_range().end(), next.text_range().start());
-                let rule = if self.gap_is_free(gap) {
-                    spacing::space_between(&token, &next)
-                } else {
-                    None
-                };
-                match rule {
+                match self.rule_between(&token, &next) {
                     // Only spaces before the next code token: the rule decides.
                     Some(space) if only_spaces => {
                         if space {
@@ -379,9 +498,8 @@ mod tests {
     }
 
     /// Formats every error-free file in the corpus, checking that each
-    /// result is equivalent, keeps every line break and indentation (the
-    /// rules so far only change spacing within lines), and is stable when
-    /// formatted again. Run with:
+    /// result is equivalent, keeps every line break (rules only add them so
+    /// far), and is stable when formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
@@ -392,14 +510,8 @@ mod tests {
         let files = crate::lossless_tree::corpus::corpus_files();
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
-        let indents = |s: &str| -> Vec<String> {
-            s.split('\n')
-                .map(|l| {
-                    let l = l.trim_end();
-                    l[..l.len() - l.trim_start().len()].to_string()
-                })
-                .collect()
-        };
+        let (mut broken, mut lines_added) = (0, 0);
+        let lines = |s: &str| s.matches('\n').count();
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
@@ -415,8 +527,12 @@ mod tests {
                 Ok(out) => {
                     formatted += 1;
                     changed += usize::from(out != source);
-                    if indents(&out) != indents(&source) {
-                        failures.push(format!("{}: changed lines or indentation", path.display()));
+                    if lines(&out) > lines(&source) {
+                        broken += 1;
+                        lines_added += lines(&out) - lines(&source);
+                    }
+                    if lines(&out) < lines(&source) {
+                        failures.push(format!("{}: lost line breaks", path.display()));
                     } else if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str())
                     {
                         failures.push(format!("{}: not idempotent", path.display()));
@@ -428,7 +544,7 @@ mod tests {
             println!("{failure}");
         }
         println!(
-            "{} files: {formatted} formatted ({changed} changed), {skipped} skipped for syntax errors, {refused} known refusals, {} failed",
+            "{} files: {formatted} formatted ({changed} changed, {broken} with {lines_added} lines added), {skipped} skipped for syntax errors, {refused} known refusals, {} failed",
             files.len(),
             failures.len()
         );
@@ -436,9 +552,12 @@ mod tests {
     }
 
     /// Formats `source` with structural rules and with only the fallback,
-    /// describing the first difference, if any.
+    /// at a width where nothing needs to break, describing the first
+    /// difference, if any.
     fn rules_disagree(source: &str) -> Option<String> {
-        let options = FormatOptions::default();
+        let options = FormatOptions {
+            max_width: 1_000_000,
+        };
         let structural = format_with(source, &options, Rules::Structural);
         let fallback = format_with(source, &options, Rules::Fallback);
         if structural == fallback {
@@ -462,9 +581,9 @@ mod tests {
         ))
     }
 
-    /// Until rules start breaking lines (step 2 of PLAN.md), a structural
-    /// rule must print exactly what the fallback prints. Checks the inputs
-    /// of every `.stat` case.
+    /// Where everything fits on its line, a structural rule must print
+    /// exactly what the fallback prints. Checks the inputs of every `.stat`
+    /// case.
     #[test]
     fn structural_rules_match_fallback_on_stat_inputs() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
@@ -511,5 +630,49 @@ mod tests {
         }
         println!("{} files, {} differ", files.len(), failures.len());
         assert!(failures.is_empty());
+    }
+
+    /// sbt's code is formatted by scalafmt with the configuration scuff
+    /// follows, so every change scuff makes to it is a disagreement with
+    /// scalafmt. Writes the changed files out to compare, without failing.
+    /// Run with:
+    /// `cargo test --release corpus_sbt -- --ignored --nocapture`
+    #[test]
+    #[ignore = "slow; reports differences from scalafmt over modules/sbt"]
+    fn corpus_sbt_differences_from_scalafmt() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("modules/sbt");
+        // sbt's `project.excludePaths`, and its scripted tests.
+        let excluded = [
+            "/contraband-scala/",
+            "/launcher-package/citest",
+            "-test/",
+            "/server-test/src/server-test/",
+            "/src/sbt-test/",
+        ];
+        let files: Vec<_> = crate::lossless_tree::corpus::corpus_files()
+            .into_iter()
+            .filter(|f| f.starts_with(&root))
+            .filter(|f| !excluded.iter().any(|e| f.to_string_lossy().contains(e)))
+            .collect();
+        // Formatted copies of the changed files, to compare with `diff -r`.
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sbt-formatted");
+        let _ = std::fs::remove_dir_all(&out_dir);
+        let mut changed = 0;
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(out) = format(&source, &FormatOptions::default()) else {
+                continue;
+            };
+            if out != source {
+                changed += 1;
+                let copy = out_dir.join(path.strip_prefix(&root).unwrap());
+                std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+                std::fs::write(copy, out).unwrap();
+            }
+        }
+        println!("formatted copies in {}", out_dir.display());
+        println!("{} sbt files, {changed} changed", files.len());
     }
 }

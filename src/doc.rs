@@ -37,6 +37,11 @@ pub enum Doc<'a> {
     Concat(Vec<Doc<'a>>),
     /// Indents the lines that start inside it by one level.
     Nest(Box<Doc<'a>>),
+    /// Indents the lines that start inside it from the indentation of the
+    /// line it starts on, instead of from the enclosing nesting. For laying
+    /// out part of a line whose indentation came from elsewhere, such as
+    /// copied from the source.
+    FromLineIndent(Box<Doc<'a>>),
     /// Printed flat if it fits, broken otherwise.
     Group(Box<Doc<'a>>),
     /// Prints `broken` if the enclosing group breaks, `flat` if not.
@@ -107,6 +112,10 @@ impl<'a> Doc<'a> {
 
     pub fn nest(self) -> Doc<'a> {
         Doc::Nest(Box::new(self))
+    }
+
+    pub fn from_line_indent(self) -> Doc<'a> {
+        Doc::FromLineIndent(Box::new(self))
     }
 
     pub fn group(self) -> Doc<'a> {
@@ -183,6 +192,8 @@ enum Mode {
 
 #[derive(Clone, Copy)]
 struct Command<'d, 'a> {
+    /// Index into the base indentations, which come before `indent` levels.
+    base: usize,
     indent: usize,
     mode: Mode,
     doc: &'d Doc<'a>,
@@ -198,7 +209,10 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
     let indent_width = width(&options.indent);
     let mut out = String::new();
     let mut column = 0;
+    // The base indentation of each `FromLineIndent`, after none at all.
+    let mut bases = vec![String::new()];
     let mut commands = vec![Command {
+        base: 0,
         indent: 0,
         mode: Mode::Break,
         doc,
@@ -208,7 +222,12 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
     let mut verbatim_end = 0;
 
     while let Some(command) = commands.pop() {
-        let Command { indent, mode, doc } = command;
+        let Command {
+            base,
+            indent,
+            mode,
+            doc,
+        } = command;
         match doc {
             Doc::Nil | Doc::BreakParent => {}
             Doc::Text(text) => {
@@ -224,15 +243,33 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 };
             }
             Doc::Concat(parts) => {
-                commands.extend(parts.iter().rev().map(|doc| Command { indent, mode, doc }));
+                commands.extend(parts.iter().rev().map(|doc| Command {
+                    base,
+                    indent,
+                    mode,
+                    doc,
+                }));
             }
             Doc::Nest(inner) => commands.push(Command {
+                base,
                 indent: indent + 1,
                 mode,
                 doc: inner,
             }),
+            Doc::FromLineIndent(inner) => {
+                let line = &out[out.rfind(['\n', '\r']).map_or(0, |i| i + 1)..];
+                let leading = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
+                bases.push(leading.to_string());
+                commands.push(Command {
+                    base: bases.len() - 1,
+                    indent: 0,
+                    mode,
+                    doc: inner,
+                });
+            }
             Doc::Group(inner) => {
                 let flat = Command {
+                    base,
                     indent,
                     mode: Mode::Flat,
                     doc: inner,
@@ -244,17 +281,20 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     Mode::Break
                 };
                 commands.push(Command {
+                    base,
                     indent,
                     mode,
                     doc: inner,
                 });
             }
             Doc::IfBreak { broken, flat } => commands.push(Command {
+                base,
                 indent,
                 mode,
                 doc: if mode == Mode::Break { broken } else { flat },
             }),
             Doc::LineSuffix(inner) => suffixes.push(Command {
+                base,
                 indent,
                 mode,
                 doc: inner,
@@ -275,10 +315,11 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     let trimmed = out.trim_end_matches([' ', '\t']).len();
                     out.truncate(trimmed.max(verbatim_end));
                     out.push_str(&options.line_ending);
+                    out.push_str(&bases[base]);
                     for _ in 0..indent {
                         out.push_str(&options.indent);
                     }
-                    column = indent * indent_width;
+                    column = width(&bases[base]) + indent * indent_width;
                 }
             },
         }
@@ -321,7 +362,9 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             Doc::Line(LineKind::Line) => room -= 1,
             Doc::Line(_) => {}
             Doc::Concat(parts) => stack.extend(parts.iter().rev().map(|doc| (mode, doc))),
-            Doc::Nest(inner) | Doc::Group(inner) => stack.push((mode, inner)),
+            Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+                stack.push((mode, inner));
+            }
             Doc::IfBreak { broken, flat } => {
                 stack.push((mode, if mode == Mode::Break { broken } else { flat }));
             }
@@ -451,6 +494,24 @@ mod tests {
             ..PrintOptions::default()
         };
         assert_eq!(print(&doc, &tabs), "def f =\n\tval x = 1\n\tx\nend f");
+    }
+
+    #[test]
+    fn from_line_indent_starts_from_the_lines_indentation() {
+        // Indentation written as text, as when it's copied from the source.
+        let args = Doc::softline() + t("a") + t(",") + Doc::line() + t("b");
+        let list = (t("(") + args.nest() + Doc::softline() + t(")"))
+            .group()
+            .from_line_indent();
+        let doc = t("    \tf") + list.clone() + Doc::hardline() + t("g") + list.clone();
+        assert_eq!(at(80, &doc), "    \tf(a, b)\ng(a, b)");
+        assert_eq!(
+            at(7, &doc),
+            "    \tf(\n    \t  a,\n    \t  b\n    \t)\ng(a, b)"
+        );
+        // Inside a nest, the line's indentation replaces the nesting.
+        let nested = (Doc::hardline() + t("x") + Doc::hardline() + t(" y") + list).nest();
+        assert_eq!(at(5, &nested), "\n  x\n   y(\n     a,\n     b\n   )");
     }
 
     #[test]

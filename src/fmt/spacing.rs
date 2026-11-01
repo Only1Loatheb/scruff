@@ -78,10 +78,27 @@ fn decide(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
         return false;
     }
 
-    // Varargs: `xs*`, `xs: _*`.
+    // Varargs: `xs*`, `xs: _*`, `args: String*`. tree-sitter reads the
+    // argument `xs: _ *` as a repeated type instead of a vararg, so that
+    // space stays.
     if b.text() == "*"
-        && b.parent()
-            .is_some_and(|p| matches!(p.kind(), SyntaxKind::Vararg | SyntaxKind::RepeatPattern))
+        && b.parent().is_some_and(|p| match p.kind() {
+            SyntaxKind::Vararg | SyntaxKind::RepeatPattern => true,
+            SyntaxKind::RepeatedParameterType => a.text() != "_",
+            _ => false,
+        })
+    {
+        return false;
+    }
+
+    // A splat after an expression, `f(a ++ b*)`, which tree-sitter reads
+    // as a postfix `*`.
+    if b.text() == "*"
+        && b.parent().is_some_and(|p| {
+            p.kind() == SyntaxKind::PostfixExpression
+                && p.parent()
+                    .is_some_and(|g| g.kind() == SyntaxKind::Arguments)
+        })
     {
         return false;
     }
@@ -90,6 +107,13 @@ fn decide(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     if (ak == T!["#"] || bk == T!["#"])
         && a.parent()
             .is_some_and(|p| p.kind() == SyntaxKind::ProjectedType)
+    {
+        return false;
+    }
+
+    // An access qualifier: `private[sbt]`.
+    if b.parent()
+        .is_some_and(|p| p.kind() == SyntaxKind::AccessQualifier)
     {
         return false;
     }
@@ -112,6 +136,17 @@ fn applies_to(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     }) {
         return false;
     }
+    // An infix operator, as in `xs map (f)`, doesn't apply to what follows.
+    if a.field_name() == Some("operator") {
+        return false;
+    }
+    // Constructor parameters after an access modifier, as in
+    // `class A private[p] (a: Int)`.
+    if a.parent_ancestors()
+        .any(|n| n.kind() == SyntaxKind::AccessModifier && n.last_token() == Some(*a))
+    {
+        return false;
+    }
     // A keyword used as a name, such as `def extension(a: Int)`: tree-sitter
     // wraps the keyword token in an identifier node.
     if a.parent()
@@ -121,9 +156,14 @@ fn applies_to(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     }
     match a.kind() {
         T![")"] | T!["]"] | T![this] | T![super] | T!["'"] => true,
-        // An operator applies when it's a name, as in `def +(x)`, but not
-        // when it's an infix operator, as in `a + (b)`.
-        SyntaxKind::OperatorIdentifier => a.field_name() != Some("operator"),
+        // Arguments after a block argument: `f { a }(b)`.
+        T!["}"] => b
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::Arguments),
+        // A placeholder: `_()`.
+        _ if a.parent().is_some_and(|p| p.kind() == SyntaxKind::Wildcard) => true,
+        // An operator applies when it's a name, as in `def +(x)`.
+        SyntaxKind::OperatorIdentifier => true,
         // Names and literals apply; keywords like `if (` and `extension [`
         // don't.
         kind => kind.is_named(),

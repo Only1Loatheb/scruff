@@ -1,0 +1,134 @@
+# Argument and parameter lists: on one line if they fit, otherwise one item
+# per line with `)` on its own line, as in sbt's code. Arguments indent 2
+# spaces and parameters 4, from the indentation of the line they start on.
+maxColumn = 40
+
+<<< a list that fits stays on one line
+val x = f(alpha, beta, gamma)
+>>>
+val x = f(alpha, beta, gamma)
+
+<<< arguments that don't fit go one per line
+val x = compute(alpha, beta, gamma, delta)
+>>>
+val x = compute(
+  alpha,
+  beta,
+  gamma,
+  delta
+)
+
+<<< parameters indent four spaces
+def compute(alpha: Int, beta: Int): Int = 1
+>>>
+def compute(
+    alpha: Int,
+    beta: Int
+): Int = 1
+
+<<< class parameters, with what follows after the closing parenthesis
+case class Point(x: Int, y: Int) extends Shape
+>>>
+case class Point(
+    x: Int,
+    y: Int
+) extends Shape
+
+<<< with several parameter lists, the last one that doesn't fit breaks
+def run(alpha: Int)(using ctx: Context): Unit = ()
+>>>
+def run(alpha: Int)(
+    using ctx: Context
+): Unit = ()
+
+<<< an inner list breaks only if it doesn't fit on its own line
+val x = outer(inner(alpha, beta), gamma1)
+val y = outer(inner(alpha, beta, gamma, delta, epsilon))
+>>>
+val x = outer(
+  inner(alpha, beta),
+  gamma1
+)
+val y = outer(
+  inner(
+    alpha,
+    beta,
+    gamma,
+    delta,
+    epsilon
+  )
+)
+
+<<< indentation starts from the line the list is on
+object A {
+  def f = {
+    compute(alpha, beta, gamma, delta, e)
+  }
+}
+>>>
+object A {
+  def f = {
+    compute(
+      alpha,
+      beta,
+      gamma,
+      delta,
+      e
+    )
+  }
+}
+
+<<< the rest of the line counts
+val x = f(alpha, beta).andThenSomethingElse
+>>>
+val x = f(
+  alpha,
+  beta
+).andThenSomethingElse
+
+<<< one argument breaks too, even if it still doesn't fit
+log("a long message that never fits in 40")
+>>>
+log(
+  "a long message that never fits in 40"
+)
+
+<<< an empty list stays
+val result = someVeryLongFunctionName()
+>>>
+val result = someVeryLongFunctionName()
+
+<<< a list written over several lines keeps its line breaks
+val x = compute(alpha,
+    beta, gamma)
+>>>
+val x = compute(alpha,
+    beta, gamma)
+
+<<< a list with a comment stays as written
+val x = compute(alpha, /* b */ beta, gamma)
+>>>
+val x = compute(alpha, /* b */ beta, gamma)
+
+<<< a trailing comma stays as written
+val x = compute(
+  alpha,
+)
+>>>
+val x = compute(
+  alpha,
+)
+
+<<< inside a Scala 3 indentation region
+def f =
+  val x = compute(alpha, beta, gamma, delta)
+  x
+>>>
+def f =
+  val x = compute(
+    alpha,
+    beta,
+    gamma,
+    delta
+  )
+  x

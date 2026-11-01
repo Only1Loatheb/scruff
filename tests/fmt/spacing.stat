@@ -597,3 +597,50 @@ maxColumn = 100
 val foo = new Bar ( () => println("a") )
 >>>
 val foo = new Bar(() => println("a"))
+
+<<< no space before an access qualifier, one after it before constructor parameters
+private [sbt] val x = 1
+class Server private[IPC](s: Int)
+class A private (s: Int)
+>>>
+private[sbt] val x = 1
+class Server private[IPC] (s: Int)
+class A private (s: Int)
+
+<<< a repeated parameter type hugs its star
+def f(args: String *, more: (Int, Int) *) = 1
+>>>
+def f(args: String*, more: (Int, Int)*) = 1
+
+<<< a placeholder applies
+val f = g(_ ())
+>>>
+val f = g(_())
+
+<<< an alphanumeric infix operator keeps its space before a parenthesis
+val ys = xs map(_ + 1)
+val zs = files flatMap (f)
+>>>
+val ys = xs map (_ + 1)
+val zs = files flatMap (f)
+
+<<< arguments after a block argument apply
+val x = f { a } (b)
+>>>
+val x = f { a }(b)
+
+<<< a splat after an expression hugs its star
+val x = f(a ++ b *)
+val y = f(xs.map { x =>
+  x
+}*)
+>>>
+val x = f(a ++ b*)
+val y = f(xs.map { x =>
+  x
+}*)
+
+<<< a spaced vararg wildcard keeps its space, which tree-sitter parses differently
+val x = f(xs: _ *)
+>>>
+val x = f(xs: _ *)
