@@ -52,11 +52,26 @@ impl std::error::Error for FormatError {}
 
 /// Formats Scala source.
 pub fn format(source: &str, options: &FormatOptions) -> Result<String, FormatError> {
+    format_with(source, options, Rules::Structural)
+}
+
+/// Which rules build the document.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rules {
+    /// A node's own rule where it has one, otherwise the fallback.
+    Structural,
+    /// Only the fallback: children in order, spacing from [`spacing`].
+    /// Tests compare it with [`Rules::Structural`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fallback,
+}
+
+fn format_with(source: &str, options: &FormatOptions, rules: Rules) -> Result<String, FormatError> {
     let parse = parse(source);
     if !parse.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(parse.errors().to_vec()));
     }
-    let doc = to_doc(&parse);
+    let doc = build_doc(&parse, rules);
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
@@ -69,8 +84,13 @@ pub fn format(source: &str, options: &FormatOptions) -> Result<String, FormatErr
 
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
+    build_doc(parse, Rules::Structural)
+}
+
+fn build_doc<'t>(parse: &'t Parse, rules: Rules) -> Doc<'t> {
     let mut formatter = Formatter {
         parse,
+        rules,
         text: parse.syntax().text(),
         verbatim: parse.verbatim_ranges(),
         next_verbatim: 0,
@@ -85,6 +105,7 @@ pub fn to_doc<'t>(parse: &'t Parse) -> Doc<'t> {
 /// reached.
 struct Formatter<'t> {
     parse: &'t Parse,
+    rules: Rules,
     text: &'t str,
     verbatim: &'t [VerbatimRange],
     /// The first verbatim range that hasn't ended before the current
@@ -92,6 +113,19 @@ struct Formatter<'t> {
     next_verbatim: usize,
     /// End of the last verbatim range copied; source before it is done.
     copied_until: TextSize,
+}
+
+/// What comes just before a piece of trivia on its line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gap {
+    /// Nothing: the start of a line, or of the file.
+    LineStart,
+    /// Code, with no space yet.
+    AfterCode,
+    /// A comment, with no space yet.
+    AfterComment,
+    /// Whitespace kept as written.
+    Space,
 }
 
 /// What a stretch of source is, so it can be printed the right way.
@@ -104,9 +138,26 @@ enum Piece {
 }
 
 impl<'t> Formatter<'t> {
+    fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        if self.rules == Rules::Structural
+            && let Some(doc) = self.structural(node)
+        {
+            return doc;
+        }
+        self.fallback(node)
+    }
+
+    /// The node's own rule, if its kind has one. None yet.
+    #[allow(clippy::match_single_binding)] // until the first rule
+    fn structural(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        match node.kind() {
+            _ => None,
+        }
+    }
+
     /// The default rule: the node's code children in order, each token with
     /// its comments and whitespace.
-    fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+    fn fallback(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         let children: Vec<_> = node.non_trivia_children().collect();
         Doc::concat(children.into_iter().map(|child| self.element(child)))
     }
@@ -120,13 +171,8 @@ impl<'t> Formatter<'t> {
 
     fn token(&mut self, token: SyntaxToken<'t>) -> Doc<'t> {
         let mut docs = Vec::new();
-        // Indentation after a line break stays; a gap after a comment on the
-        // same line becomes one space.
-        let mut after_comment = false;
-        for trivia in token.leading_trivia() {
-            docs.push(self.gap_or_trivia(trivia, after_comment));
-            after_comment = trivia.is_comment();
-        }
+        let leading: Vec<_> = token.leading_trivia().collect();
+        self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
         docs.push(self.source(token.text_range(), Piece::Code));
 
         let trailing: Vec<_> = token.trailing_trivia().collect();
@@ -149,11 +195,8 @@ impl<'t> Formatter<'t> {
                             docs.push(Doc::text(" "));
                         }
                     }
-                    // Comments in between get one space on each side.
                     Some(_) => {
-                        for trivia in trailing {
-                            docs.push(self.gap_or_trivia(trivia, true));
-                        }
+                        self.trivia_within_lines(&mut docs, &trailing, Gap::AfterCode, Some(&next));
                     }
                     None => {
                         for trivia in trailing {
@@ -165,26 +208,57 @@ impl<'t> Formatter<'t> {
             // The end of the line: one space before a comment. Spaces at the
             // very end go; the printer trims them anyway.
             None if only_spaces => {}
-            None => {
-                for trivia in trailing {
-                    docs.push(self.gap_or_trivia(trivia, true));
-                }
-            }
+            None => self.trivia_within_lines(&mut docs, &trailing, Gap::AfterCode, None),
         }
         Doc::concat(docs)
     }
 
-    /// A space for whitespace between code and a comment on the same line,
-    /// otherwise the trivia as written.
-    fn gap_or_trivia(&mut self, trivia: SyntaxTrivia<'t>, within_line: bool) -> Doc<'t> {
-        if within_line
-            && trivia.kind() == TriviaKind::Whitespace
-            && self.is_free(trivia.text_range().start())
-        {
-            Doc::text(" ")
-        } else {
-            self.trivia(trivia)
+    /// Pushes `trivia`, which comes before `next`, with scalafmt's spacing
+    /// around comments: one space on each side of a comment within a line,
+    /// except none before `,`, `;` or `:`. Indentation and anything verbatim
+    /// stay as written.
+    fn trivia_within_lines(
+        &mut self,
+        docs: &mut Vec<Doc<'t>>,
+        trivia: &[SyntaxTrivia<'t>],
+        mut before: Gap,
+        next: Option<&SyntaxToken<'t>>,
+    ) {
+        for &t in trivia {
+            let start = t.text_range().start();
+            match t.kind() {
+                TriviaKind::Newline => {
+                    docs.push(self.trivia(t));
+                    before = Gap::LineStart;
+                }
+                TriviaKind::Whitespace if before == Gap::LineStart || !self.is_free(start) => {
+                    docs.push(self.trivia(t));
+                    before = Gap::Space;
+                }
+                // Within a line: the space, if any, depends on what's around it.
+                TriviaKind::Whitespace => {}
+                TriviaKind::LineComment | TriviaKind::BlockComment => {
+                    if matches!(before, Gap::AfterCode | Gap::AfterComment) && self.free_at(start) {
+                        docs.push(Doc::text(" "));
+                    }
+                    docs.push(self.trivia(t));
+                    before = Gap::AfterComment;
+                }
+            }
         }
+        if let Some(next) = next
+            && before == Gap::AfterComment
+            && !matches!(next.text(), "," | ";" | ":")
+            && self.free_at(next.text_range().start())
+        {
+            docs.push(Doc::text(" "));
+        }
+    }
+
+    /// Whether a space may be inserted at `offset`: it's not inside a
+    /// verbatim range, though it may be at the start of one.
+    fn free_at(&self, offset: TextSize) -> bool {
+        self.gap_is_free(TextRange::new(offset, offset))
     }
 
     /// Whether the source at `offset` may be changed: it's not in a verbatim
@@ -358,6 +432,84 @@ mod tests {
             files.len(),
             failures.len()
         );
+        assert!(failures.is_empty());
+    }
+
+    /// Formats `source` with structural rules and with only the fallback,
+    /// describing the first difference, if any.
+    fn rules_disagree(source: &str) -> Option<String> {
+        let options = FormatOptions::default();
+        let structural = format_with(source, &options, Rules::Structural);
+        let fallback = format_with(source, &options, Rules::Fallback);
+        if structural == fallback {
+            return None;
+        }
+        let show = |r: &Result<String, FormatError>| match r {
+            Ok(out) => out.clone(),
+            Err(e) => format!("error: {e}\n"),
+        };
+        let (s, f) = (show(&structural), show(&fallback));
+        let line = s
+            .lines()
+            .zip(f.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| s.lines().count().min(f.lines().count()));
+        Some(format!(
+            "first difference at output line {}:\n  structural: {:?}\n  fallback:   {:?}",
+            line + 1,
+            s.lines().nth(line).unwrap_or("<end>"),
+            f.lines().nth(line).unwrap_or("<end>"),
+        ))
+    }
+
+    /// Until rules start breaking lines (step 2 of PLAN.md), a structural
+    /// rule must print exactly what the fallback prints. Checks the inputs
+    /// of every `.stat` case.
+    #[test]
+    fn structural_rules_match_fallback_on_stat_inputs() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
+        let mut failures = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "stat") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for case in text.split("\n<<<").skip(1) {
+                let (title, body) = case.split_once('\n').unwrap_or((case, ""));
+                let input = body.split("\n>>>").next().unwrap_or("");
+                let input = input.split_once("===\n").map_or(input, |(_, rest)| rest);
+                if let Some(difference) = rules_disagree(&format!("{input}\n")) {
+                    failures.push(format!(
+                        "{}: {}\n{difference}",
+                        path.display(),
+                        title.trim()
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    }
+
+    /// The same check over the corpus. Run with:
+    /// `cargo test --release corpus -- --ignored --nocapture`
+    #[test]
+    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    fn corpus_structural_rules_match_fallback() {
+        let files = crate::lossless_tree::corpus::corpus_files();
+        let mut failures = Vec::new();
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            if let Some(difference) = rules_disagree(&source) {
+                failures.push(format!("{}: {difference}", path.display()));
+            }
+        }
+        for failure in failures.iter().take(15) {
+            println!("{failure}");
+        }
+        println!("{} files, {} differ", files.len(), failures.len());
         assert!(failures.is_empty());
     }
 }

@@ -1,0 +1,205 @@
+# Comments inside a node, between the pieces a structural rule builds from.
+# Each comment stays attached to the same token, with one space between it
+# and code on the same line.
+
+<<< between a keyword and a name
+def  /* a */  f = 1
+>>>
+def /* a */ f = 1
+
+<<< before the equals sign
+def f  /* a */ = 1
+val x: Int  /* b */ = 2
+>>>
+def f /* a */ = 1
+val x: Int /* b */ = 2
+
+<<< between modifiers
+private  /* a */  final val x = 1
+>>>
+private /* a */ final val x = 1
+
+<<< between an annotation and a definition
+@inline  /* hot */  def f = 1
+>>>
+@inline /* hot */ def f = 1
+
+<<< after an opening and before a closing parenthesis
+val x = f(  /* a */ y /* b */  )
+>>>
+val x = f( /* a */ y /* b */ )
+
+<<< after each parameter
+def f(
+    a: Int,   // first
+    b: Int // second
+) = a
+>>>
+def f(
+    a: Int, // first
+    b: Int // second
+) = a
+
+<<< on their own lines between parameters
+def f(
+    // first
+    a: Int,
+    /* second */
+    b: Int
+) = a
+>>>
+def f(
+    // first
+    a: Int,
+    /* second */
+    b: Int
+) = a
+
+<<< in type parameter and argument lists
+def f[ /* t */ A](a: A): Map[ /* k */ String,  /* v */ Int] = Map()
+>>>
+def f[ /* t */ A](a: A): Map[ /* k */ String, /* v */ Int] = Map()
+
+<<< after extends and with
+class A extends  /* a */ B with  /* b */  C
+>>>
+class A extends /* a */ B with /* b */ C
+
+<<< after an operator, ending the line
+val x = a +  // why
+  b
+>>>
+val x = a + // why
+  b
+
+<<< before a dot in a chain
+val ys = xs
+  // keep evens
+  .filter(_ % 2 == 0) // done
+  .map(_ + 1)
+>>>
+val ys = xs
+  // keep evens
+  .filter(_ % 2 == 0) // done
+  .map(_ + 1)
+
+<<< in an if expression
+val x = if (a)  /* yes */ b else  /* no */  c
+>>>
+val x = if (a) /* yes */ b else /* no */ c
+
+<<< after an opening brace and before a closing one
+object A {  // note
+  val x = 1
+  // last
+}
+>>>
+object A { // note
+  val x = 1
+  // last
+}
+
+<<< in a case clause
+val y = x match {
+  case 1  /* one */ => a // first
+  case _ =>  /* other */  b
+}
+>>>
+val y = x match {
+  case 1 /* one */ => a // first
+  case _ => /* other */ b
+}
+
+<<< before a lambda arrow
+val ys = xs.map { x  /* each */  => x }
+>>>
+val ys = xs.map { x /* each */ => x }
+
+<<< in an indentation region
+def f =
+  // one
+  1  // done
+>>>
+def f =
+  // one
+  1 // done
+
+<<< a doc comment before a definition stays as written
+object A {
+  /** Does it.
+    *
+    * @param a  the input
+    */
+  def f(a: Int) = a
+}
+>>>
+object A {
+  /** Does it.
+    *
+    * @param a  the input
+    */
+  def f(a: Int) = a
+}
+
+<<< a comment touching code gets a space on each side
+@inline/* hot */def f = 1
+def g /* a */= 1
+class A extends B with/* b */C
+val m: Map[String,/* v */Int] = Map()
+val x = if (a) b else/* no */c
+val y = f(/* a */x/* b */)
+>>>
+@inline /* hot */ def f = 1
+def g /* a */ = 1
+class A extends B with /* b */ C
+val m: Map[String, /* v */ Int] = Map()
+val x = if (a) b else /* no */ c
+val y = f( /* a */ x /* b */ )
+
+<<< no space between a comment and a following comma, semicolon or colon
+class A extends B /* b */ ,C, D
+val y = f(a /* a */ ,b)
+val z = 1 /* z */ ; val w = 2
+trait T /* t */ :
+  val x = 1
+>>>
+class A extends B /* b */, C, D
+val y = f(a /* a */, b)
+val z = 1 /* z */; val w = 2
+trait T /* t */:
+  val x = 1
+
+<<< comments touching each other get a space between them
+val x = 1/* a *//* b */
+val y = f(a/* a *//* b */, b)
+>>>
+val x = 1 /* a */ /* b */
+val y = f(a /* a */ /* b */, b)
+
+<<< a comment starting a line keeps its indentation and gets a space after it
+object A {
+    /* a */val x = 1
+  val y = 2
+}
+object B {
+  /* b */   /* c */  val y = 2
+}
+>>>
+object A {
+    /* a */ val x = 1
+  val y = 2
+}
+object B {
+  /* b */ /* c */ val y = 2
+}
+
+<<< comments in a format-off block stay as written
+// format: off
+val x = 1/* a */  /* b */
+f(/* c */x)
+// format: on
+>>>
+// format: off
+val x = 1/* a */  /* b */
+f(/* c */x)
+// format: on
