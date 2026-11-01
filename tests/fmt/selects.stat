@@ -1,0 +1,92 @@
+# Select chains with at least two calls: on one line if they fit, otherwise
+# broken before the first call's `.` and every `.` after it, each indented 2
+# spaces, as scalafmt's classic select chains in sbt's code.
+maxColumn = 40
+
+<<< a chain that fits stays on one line
+val ys = xs.map(f).filter(g)
+>>>
+val ys = xs.map(f).filter(g)
+
+<<< a chain that doesn't fit breaks before each dot
+val ys = xs.map(f).filter(good).take(n1).drop(2)
+>>>
+val ys = xs
+  .map(f)
+  .filter(good)
+  .take(n1)
+  .drop(2)
+
+<<< field selects before the first call stay with the head
+val v = sys.env.get(key).map(parse).getOrElse(d)
+>>>
+val v = sys.env
+  .get(key)
+  .map(parse)
+  .getOrElse(d)
+
+<<< field selects after the first call get lines of their own
+val n = xs.map(f).filter(good).toList.length12
+>>>
+val n = xs
+  .map(f)
+  .filter(good)
+  .toList
+  .length12
+
+<<< type arguments without a call stay with the head too
+val ys = xs.asInstanceOf[List[Int]].map(f).filter(g)
+>>>
+val ys = xs.asInstanceOf[List[Int]]
+  .map(f)
+  .filter(g)
+
+<<< a head that is a call keeps its arguments
+val r = compute(alpha).map(f).filter(g1234)
+>>>
+val r = compute(alpha)
+  .map(f)
+  .filter(g1234)
+
+<<< one call is not a chain; its arguments break instead
+val ys = Generator.string(alpha, beta, gamma1)
+>>>
+val ys = Generator.string(
+  alpha,
+  beta,
+  gamma1
+)
+
+<<< a block argument in a chain
+val ys = xs.map { x => x + 1 }.filter(good1)
+>>>
+val ys = xs
+  .map { x => x + 1 }
+  .filter(good1)
+
+<<< one call and a field is not a chain either; a lambda breaks instead
+val ys = xs.map(x => transform(x, alpha, beta, gamma)).toList
+>>>
+val ys = xs.map(x =>
+  transform(x, alpha, beta, gamma)
+).toList
+
+<<< the dots break first, then a call that still doesn't fit
+val ys = xs.map(x => transform(x, alpha, beta)).filter(ok)
+val zs = xs.map(x => transform(x, alpha, beta, gamma1)).filter(ok)
+>>>
+val ys = xs
+  .map(x => transform(x, alpha, beta))
+  .filter(ok)
+val zs = xs
+  .map(x =>
+    transform(x, alpha, beta, gamma1)
+  )
+  .filter(ok)
+
+<<< a chain written over several lines keeps its line breaks
+val ys = xs.map(f)
+  .filter(g).take(n)
+>>>
+val ys = xs.map(f)
+  .filter(g).take(n)

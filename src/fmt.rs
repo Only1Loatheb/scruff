@@ -165,6 +165,9 @@ impl<'t> Formatter<'t> {
             SyntaxKind::Parameters | SyntaxKind::ClassParameters => self.list(node, 2),
             SyntaxKind::InfixExpression => self.infix(node),
             SyntaxKind::Block => self.braced(node),
+            SyntaxKind::CallExpression
+            | SyntaxKind::FieldExpression
+            | SyntaxKind::GenericFunction => self.select_chain(node),
             _ => None,
         }
     }
@@ -333,6 +336,73 @@ impl<'t> Formatter<'t> {
                 .group()
                 .from_line_indent()
                 + close_trailing,
+        )
+    }
+
+    /// A select chain with at least two calls, such as `xs.map(f).filter(g)`:
+    /// on one line if it fits, otherwise broken before the first call's `.`
+    /// and every `.` after it, each indented 2 spaces, as scalafmt's classic
+    /// select chains in sbt's code. Field selects before the first call stay
+    /// with the head: `sys.env` in `sys.env.get(k).map(f)`.
+    fn select_chain(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        // Only the outermost node of a chain; the ones inside are its parts.
+        if let Some(parent) = node.parent()
+            && chain_spine(parent).is_some_and(|spine| spine == NodeOrToken::Node(node))
+        {
+            return None;
+        }
+        if !self.can_break(node) {
+            return None;
+        }
+        // Walk down the spine, from the last select to the head. `pending`
+        // holds what follows the current part: arguments and type arguments.
+        let mut segments: Vec<(Vec<SyntaxElement<'t>>, bool)> = Vec::new();
+        let mut pending: Vec<SyntaxElement<'t>> = Vec::new();
+        let mut applied = false;
+        let mut current = NodeOrToken::Node(node);
+        let head = loop {
+            let NodeOrToken::Node(n) = current else {
+                break current;
+            };
+            let Some(spine) = chain_spine(n) else {
+                break current;
+            };
+            let extras: Vec<_> = n.non_trivia_children().filter(|c| *c != spine).collect();
+            if n.kind() == SyntaxKind::FieldExpression {
+                let mut segment = extras;
+                segment.extend(pending.drain(..).rev());
+                segments.push((segment, applied));
+                applied = false;
+            } else {
+                applied |= n.kind() == SyntaxKind::CallExpression;
+                pending.extend(extras.into_iter().rev());
+            }
+            current = spine;
+        };
+        segments.reverse();
+        let calls = segments.iter().filter(|(_, applied)| *applied).count();
+        let first_call = segments.iter().position(|(_, applied)| *applied)?;
+        if calls < 2 {
+            return None;
+        }
+
+        let leading = self.leading_of(node);
+        let mut first_line = vec![self.element(head)];
+        first_line.extend(pending.into_iter().rev().map(|e| self.element(e)));
+        let mut segments = segments.into_iter().map(|(segment, _)| segment);
+        for segment in segments.by_ref().take(first_call) {
+            first_line.extend(segment.into_iter().map(|e| self.element(e)));
+        }
+        let mut rest = Vec::new();
+        for segment in segments {
+            rest.push(Doc::softline());
+            rest.extend(segment.into_iter().map(|e| self.element(e)));
+        }
+        Some(
+            leading
+                + (Doc::concat(first_line) + Doc::concat(rest).nest())
+                    .group()
+                    .from_line_indent(),
         )
     }
 
@@ -660,6 +730,18 @@ impl<'t> Formatter<'t> {
             _ => Doc::text(text),
         }
     }
+}
+
+/// The part of a select chain a node continues: the qualifier of a select,
+/// the function of a call, or the function given type arguments.
+fn chain_spine(node: SyntaxNode<'_>) -> Option<SyntaxElement<'_>> {
+    let field = match node.kind() {
+        SyntaxKind::FieldExpression => "value",
+        SyntaxKind::CallExpression | SyntaxKind::GenericFunction => "function",
+        _ => return None,
+    };
+    node.non_trivia_children()
+        .find(|c| c.field_name() == Some(field))
 }
 
 /// The operands and operators of an infix chain at one precedence, in
