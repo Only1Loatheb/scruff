@@ -14,11 +14,13 @@ pub use syntax_kind::SyntaxKind;
 pub use text_size::{TextRange, TextSize};
 use tree_sitter::{Language, Parser};
 pub use trivia::{SyntaxTrivia, TriviaKind};
+pub use verbatim::{VerbatimRange, VerbatimReason};
 
 mod equivalence;
 mod indentation;
 mod syntax_kind;
 mod trivia;
+mod verbatim;
 
 /// The tree-sitter-scala language, loaded once.
 pub fn language() -> &'static Language {
@@ -67,6 +69,7 @@ pub struct Parse {
     errors: Vec<SyntaxError>,
     trivia: Vec<trivia::TriviaPiece>,
     eof_trivia: trivia::TriviaSpan,
+    verbatim: verbatim::Cache,
 }
 
 /// Parses Scala source. Never fails: errors are recorded in the tree.
@@ -874,6 +877,7 @@ fn build(text: String, ts_tree: &tree_sitter::Tree) -> Parse {
         errors: Vec::new(),
         trivia: Vec::new(),
         eof_trivia: Default::default(),
+        verbatim: Default::default(),
     };
     trivia::attach(&mut parse);
     if ts_root.has_error() {
@@ -903,6 +907,7 @@ mod tests {
         assert_eq!(usize::from(pos), source.len(), "tokens stop before the end");
         assert_eq!(root.to_string(), source);
         assert_eq!(trivia::reassemble(&parse), source, "trivia doesn't add up");
+        verbatim::assert_well_formed(&parse);
         for node in root.descendants() {
             let text: String = node.tokens().map(|t| t.text()).collect();
             assert_eq!(text, node.text(), "tokens of {node:?} don't match its text");
@@ -1320,6 +1325,7 @@ mod corpus {
     fn corpus_round_trips() {
         let files = corpus_files();
         let (mut with_errors, mut comments) = (0, 0);
+        let mut verbatim = std::collections::BTreeMap::<String, usize>::new();
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
@@ -1359,10 +1365,17 @@ mod corpus {
             );
             comments += attached;
             with_errors += usize::from(!parse.errors().is_empty());
+            verbatim::assert_well_formed(&parse);
+            for range in parse.verbatim_ranges() {
+                let reason = format!("{:?}", range.reason);
+                let reason = reason.split('(').next().unwrap_or_default().to_string();
+                *verbatim.entry(reason).or_default() += 1;
+            }
         }
         println!(
             "{} files, {comments} comments, {with_errors} files with syntax errors",
             files.len()
         );
+        println!("verbatim ranges: {verbatim:?}");
     }
 }
