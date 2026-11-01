@@ -1190,12 +1190,28 @@ object Main extends App {
     }
 }
 
-/// Checks every `.scala` file under `$OUF_CORPUS`. Run with:
-/// `OUF_CORPUS=path/to/scala/code cargo test --release corpus -- --ignored --nocapture`
+/// Checks every `.scala` file under `modules/` (the sbt, cats and scala3
+/// submodules), or under `$OUF_CORPUS` if set. Run with:
+/// `cargo test --release corpus -- --ignored --nocapture`
 #[cfg(test)]
 mod corpus {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    /// The `.scala` files under `$OUF_CORPUS`, or under `modules/`.
+    fn corpus_files() -> Vec<PathBuf> {
+        let root = std::env::var_os("OUF_CORPUS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("modules"));
+        let mut files = Vec::new();
+        scala_files(&root, &mut files);
+        assert!(
+            !files.is_empty(),
+            "no .scala files under {}; run `git submodule update --init` or set OUF_CORPUS",
+            root.display()
+        );
+        files
+    }
 
     fn scala_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -1229,11 +1245,9 @@ mod corpus {
     }
 
     #[test]
-    #[ignore = "needs OUF_CORPUS"]
+    #[ignore = "slow; runs over modules/ or $OUF_CORPUS"]
     fn corpus_widened_spaces_are_equivalent() {
-        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
-        let mut files = Vec::new();
-        scala_files(Path::new(&root), &mut files);
+        let files = corpus_files();
         let (mut failures, mut skipped) = (Vec::new(), 0);
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
@@ -1263,11 +1277,9 @@ mod corpus {
     /// Reports how many indentation regions a formatter would have to leave
     /// alone, by reason, with a few examples of each.
     #[test]
-    #[ignore = "needs OUF_CORPUS"]
+    #[ignore = "slow; runs over modules/ or $OUF_CORPUS"]
     fn corpus_indentation_region_problems() {
-        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
-        let mut files = Vec::new();
-        scala_files(Path::new(&root), &mut files);
+        let files = corpus_files();
         let mut regions = 0;
         let mut by_problem = std::collections::BTreeMap::<String, Vec<String>>::new();
         for path in &files {
@@ -1304,11 +1316,9 @@ mod corpus {
     }
 
     #[test]
-    #[ignore = "needs OUF_CORPUS"]
+    #[ignore = "slow; runs over modules/ or $OUF_CORPUS"]
     fn corpus_round_trips() {
-        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
-        let mut files = Vec::new();
-        scala_files(Path::new(&root), &mut files);
+        let files = corpus_files();
         let (mut with_errors, mut comments) = (0, 0);
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
