@@ -1,0 +1,105 @@
+<<< scala 2 code is unchanged
+package a.b
+
+import x.{ y, z }
+
+/** Docs.
+  * More.
+  */
+class A(x: Int) extends B {
+  def f(y: Int) = x + y // add
+
+  /* block */ val z = List(1, 2)
+}
+>>>
+package a.b
+
+import x.{ y, z }
+
+/** Docs.
+  * More.
+  */
+class A(x: Int) extends B {
+  def f(y: Int) = x + y // add
+
+  /* block */ val z = List(1, 2)
+}
+
+<<< scala 3 code is unchanged
+enum Color:
+  case Red, Green
+
+object Main:
+  def show(c: Color): String =
+    c match
+      case Color.Red => "red"
+      case _ => "other"
+  end show
+end Main
+>>>
+enum Color:
+  case Red, Green
+
+object Main:
+  def show(c: Color): String =
+    c match
+      case Color.Red => "red"
+      case _ => "other"
+  end show
+end Main
+
+<<< spacing is kept for now
+maxColumn = 20
+===
+object A {
+	def f =   1   // tab and extra spaces
+}
+>>>
+object A {
+	def f =   1   // tab and extra spaces
+}
+
+<<< format off and on
+val a = 1
+// format: off
+val b  =  List(1,2,   3)
+// format: on
+val c = 3
+>>>
+val a = 1
+// format: off
+val b  =  List(1,2,   3)
+// format: on
+val c = 3
+
+<<< xml literal
+val x = <a href="y">  text {1 + 2}</a>
+>>>
+val x = <a href="y">  text {1 + 2}</a>
+
+<<< region tree-sitter misparses is copied
+object O:
+  def g =
+    a getOrElse
+      b
+>>>
+object O:
+  def g =
+    a getOrElse
+      b
+
+<<< interpolated string
+val s = s"${f(1,  2)} z"
+>>>
+val s = s"${f(1,  2)} z"
+
+<<< unicode
+val ünïcödé = "日本語" // 🎉
+>>>
+val ünïcödé = "日本語" // 🎉
+
+<<< syntax errors are refused
+object A {
+  def f( = 1
+>>>
+test does not parse

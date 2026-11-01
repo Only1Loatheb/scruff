@@ -189,31 +189,6 @@ mod tests {
         format(source, &FormatOptions::default()).unwrap_or_else(|e| panic!("{e}"))
     }
 
-    /// Baseline output: the input minus whitespace at the ends of lines.
-    fn assert_reproduces(source: &str) {
-        let out = fmt(source);
-        let strip =
-            |s: &str| -> Vec<String> { s.split('\n').map(|l| l.trim_end().to_string()).collect() };
-        assert_eq!(strip(&out), strip(source));
-        assert_eq!(fmt(&out), out, "formatting twice changes the output");
-    }
-
-    #[test]
-    fn reproduces_scala2_and_scala3() {
-        assert_reproduces(
-            "package a.b\n\nimport x.{ y, z }\n\n/** Docs.\n  * More.\n  */\nclass A(x: Int) extends B {\n  def f(y: Int) = x + y // add\n\n  /* block */ val z = List(1, 2)\n}\n",
-        );
-        assert_reproduces(
-            "enum Color:\n  case Red, Green\n\nobject Main:\n  def show(c: Color): String =\n    c match\n      case Color.Red => \"red\"\n      case _ => \"other\"\n  end show\nend Main\n",
-        );
-    }
-
-    #[test]
-    fn exact_without_trailing_whitespace() {
-        let source = "object A {\n\tdef f =   1   // keep spacing\n\n\n}\n";
-        assert_eq!(fmt(source), source);
-    }
-
     #[test]
     fn trailing_whitespace_is_removed_outside_strings() {
         let source = "val a = 1   \nval s = \"\"\"line   \n  more\"\"\"  \n";
@@ -221,16 +196,6 @@ mod tests {
             fmt(source),
             "val a = 1\nval s = \"\"\"line   \n  more\"\"\"\n"
         );
-    }
-
-    #[test]
-    fn verbatim_ranges_are_copied() {
-        assert_reproduces(
-            "val a = 1\n// format: off\nval b  =  List(1,2,   3)\n// format: on\nval c = 3\n",
-        );
-        assert_reproduces("val x = <a href=\"y\">  text {1 + 2}</a>\n");
-        assert_reproduces("object O:\n  def g =\n    a getOrElse\n      b\n");
-        assert_reproduces("val s = s\"${f(1,  2)} z\"\n");
     }
 
     #[test]
@@ -249,7 +214,6 @@ mod tests {
         assert_eq!(fmt("// only a comment"), "// only a comment");
         assert_eq!(fmt("   "), "");
         assert_eq!(fmt("val x = 1\n  "), "val x = 1\n", "a last line of spaces");
-        assert_reproduces("val ünïcödé = \"日本語\" // 🎉\n");
     }
 
     #[test]
