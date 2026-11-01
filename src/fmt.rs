@@ -310,7 +310,7 @@ mod tests {
     /// formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
-    #[ignore = "slow; runs over modules/ or $OUF_CORPUS"]
+    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_formats_every_file() {
         // Files the formatter correctly refuses because tree-sitter-scala
         // parses the formatted code differently, with the reason. None yet.

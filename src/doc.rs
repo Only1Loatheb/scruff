@@ -10,7 +10,7 @@
 //! so an outer group can break while the groups inside it stay flat.
 //!
 //! ```
-//! use ouf::doc::{Doc, PrintOptions, print};
+//! use scuff::doc::{Doc, PrintOptions, print};
 //!
 //! let args = Doc::join(["first", "second", "third"].map(Doc::text), Doc::text(",") + Doc::line());
 //! let call = Doc::text("f(") + (Doc::softline() + args).nest() + Doc::softline() + Doc::text(")");

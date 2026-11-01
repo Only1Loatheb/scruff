@@ -1,4 +1,4 @@
-//! ouf: tools for working with Scala source code.
+//! scuff: tools for working with Scala source code.
 
 pub mod doc;
 pub mod fmt;

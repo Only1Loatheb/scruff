@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ouf::fmt::{FormatError, FormatOptions, format};
+use scuff::fmt::{FormatError, FormatOptions, format};
 
 struct Case {
     file: PathBuf,

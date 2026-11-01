@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use ouf::lossless_tree;
+use scuff::lossless_tree;
 
 /// Tools for working with Scala source code.
 #[derive(Parser)]
