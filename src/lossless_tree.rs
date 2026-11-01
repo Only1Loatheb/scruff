@@ -9,12 +9,14 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 pub use equivalence::{Difference, DifferenceKind, Location, check_equivalent};
+pub use indentation::RegionProblem;
 pub use syntax_kind::SyntaxKind;
 pub use text_size::{TextRange, TextSize};
 use tree_sitter::{Language, Parser};
 pub use trivia::{SyntaxTrivia, TriviaKind};
 
 mod equivalence;
+mod indentation;
 mod syntax_kind;
 mod trivia;
 
@@ -1256,6 +1258,49 @@ mod corpus {
             failures.len()
         );
         assert!(failures.is_empty());
+    }
+
+    /// Reports how many indentation regions a formatter would have to leave
+    /// alone, by reason, with a few examples of each.
+    #[test]
+    #[ignore = "needs OUF_CORPUS"]
+    fn corpus_indentation_region_problems() {
+        let root = std::env::var("OUF_CORPUS").expect("set OUF_CORPUS to a directory");
+        let mut files = Vec::new();
+        scala_files(Path::new(&root), &mut files);
+        let mut regions = 0;
+        let mut by_problem = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for path in &files {
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let parse = parse(&source);
+            if !parse.errors().is_empty() {
+                continue;
+            }
+            for region in parse
+                .syntax()
+                .descendants()
+                .filter(SyntaxNode::is_indentation_region)
+            {
+                regions += 1;
+                if let Some(problem) = region.region_problem() {
+                    let (line, _) = parse.line_col(region.text_range().start());
+                    let at = format!("{}:{line} {:?}", path.display(), region.kind());
+                    by_problem
+                        .entry(format!("{problem:?}"))
+                        .or_default()
+                        .push(at);
+                }
+            }
+        }
+        println!("{} files, {regions} regions", files.len());
+        for (problem, places) in &by_problem {
+            println!("{problem}: {}", places.len());
+            for place in places.iter().take(4) {
+                println!("  {place}");
+            }
+        }
     }
 
     #[test]
