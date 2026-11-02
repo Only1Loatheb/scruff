@@ -19,7 +19,9 @@
 //! same as `_`: `List[?]` as `List[_]`. A vararg splice `xs*` means the same
 //! as `xs: _*`, and in a pattern as `xs @ _*`. And Scala 3's control syntax means
 //! the same as the old: `if c then a` as `if (c) a`, `while c do x` as
-//! `while (c) x`, and `for x <- xs do f(x)` as `for (x <- xs) f(x)`.
+//! `while (c) x`, and `for x <- xs do f(x)` as `for (x <- xs) f(x)`. Braces
+//! mean the same as Scala 3's indentation: `def f = { a }` as `def f =` with
+//! `a` indented below, and `class A { ... }` as `class A:`.
 
 use std::fmt;
 
@@ -77,11 +79,14 @@ impl std::error::Error for Difference {}
 /// Returns the first difference between `before` and `after`, or `Ok` if a
 /// formatter could have produced `after` from `before`.
 pub fn check_equivalent(before: &str, after: &str) -> Result<(), Difference> {
-    let before = parse(before);
-    let after = parse(after);
-    check_errors(&before, &after)?;
-    check_code(&before, &after)?;
-    check_comments(&before, &after)
+    check_equivalent_trees(&parse(before), &parse(after))
+}
+
+/// `check_equivalent` for texts already parsed.
+pub fn check_equivalent_trees(before: &Tree, after: &Tree) -> Result<(), Difference> {
+    check_errors(before, after)?;
+    check_code(before, after)?;
+    check_comments(before, after)
 }
 
 fn location(parse: &Tree, offset: TextSize) -> Location {
@@ -108,10 +113,13 @@ fn check_errors(before: &Tree, after: &Tree) -> Result<(), Difference> {
 // ---------------------------------------------------------------------------
 // Code shape.
 
-/// A node's kind in a dialect's new syntax: an `=>` rename is an `as` one.
+/// A node's kind in a dialect's new syntax: an `=>` rename is an `as` one,
+/// and a block or cases in braces are indented ones.
 fn new_kind(kind: SyntaxKind) -> SyntaxKind {
     match kind {
         SyntaxKind::ArrowRenamedIdentifier => SyntaxKind::AsRenamedIdentifier,
+        SyntaxKind::Block => SyntaxKind::IndentedBlock,
+        SyntaxKind::CaseBlock => SyntaxKind::IndentedCases,
         kind => kind,
     }
 }
@@ -180,6 +188,7 @@ fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
     match element.parent() {
         Some(parent)
             if is_condition_parens(&parent)
+                || is_case_body_block(&parent)
                 || is_type_wildcard_node(&parent)
                 || is_old_splice_node(&parent) =>
         {
@@ -249,7 +258,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_lone_rename_braces(&node)
                 || is_type_wildcard_node(&node)
                 || is_old_splice_node(&node)
-                || is_condition_parens(&node) =>
+                || is_condition_parens(&node)
+                || is_case_body_block(&node) =>
         {
             None
         }
@@ -268,6 +278,43 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
         || is_lone_rename_brace(token)
         || is_old_splice_token(token)
         || is_control_token(token)
+        || is_optional_brace(token)
+}
+
+/// A `case` clause's body in braces, as in `case a => { b; c }`, which
+/// means the same as its statements without them: `case a => b; c`.
+fn is_case_body_block(node: &SyntaxNode<'_>) -> bool {
+    matches!(node.kind(), SyntaxKind::Block | SyntaxKind::IndentedBlock)
+        && node.field_name() == Some("body")
+        && node
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::CaseClause)
+}
+
+/// A brace that Scala 3's indentation can stand for: around a block, cases,
+/// or a class body, and the `:` that opens a class body without them.
+/// `def f = { a }` means `def f =` with `a` indented below, and
+/// `class A { ... }` means `class A:` with the body indented.
+fn is_optional_brace(token: &SyntaxToken<'_>) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    match token.text() {
+        "{" | "}" => matches!(
+            parent.kind(),
+            SyntaxKind::Block
+                | SyntaxKind::CaseBlock
+                | SyntaxKind::TemplateBody
+                | SyntaxKind::EnumBody
+        ),
+        ":" => {
+            matches!(
+                parent.kind(),
+                SyntaxKind::TemplateBody | SyntaxKind::EnumBody
+            ) && parent.first_token().is_some_and(|t| t == *token)
+        }
+        _ => false,
+    }
 }
 
 /// The parentheses around an `if` or `while` condition, as in `if (c) a`,
@@ -634,6 +681,24 @@ mod tests {
         differs("if ((a)) b\n", "if (a) b\n");
         differs("if ((a)) b\n", "if a then b\n");
         differs("if (a) + b then c\n", "if a + b then c\n");
+    }
+
+    #[test]
+    fn braces_mean_the_same_as_indentation() {
+        let old = "class A {\n  def f = {\n    a\n    b\n  }\n  x match {\n    case a => {\n      b\n      c\n    }\n  }\n}\n";
+        let new = "class A:\n  def f =\n    a\n    b\n  x match\n    case a =>\n      b\n      c\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // A comment before `}` goes with the next token in both.
+        assert_eq!(
+            check_equivalent(
+                "def f = {\n  a\n  // c\n}\nval y = 1\n",
+                "def f =\n  a\n  // c\nval y = 1\n"
+            ),
+            Ok(())
+        );
+        // Statements that move out of the block don't.
+        differs("def f = {\n  a\n  b\n}\n", "def f =\n  a\nb\n");
     }
 
     #[test]

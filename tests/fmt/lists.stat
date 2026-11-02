@@ -145,6 +145,8 @@ val z = foo(
 val z = foo(x => x + 1)
 
 <<< a for expression over several lines keeps the list as written
+dialect = scala3
+===
 class A:
   given a: Arb[C] = Arb(
     for n <- Gen.alphaStr
@@ -211,6 +213,8 @@ type T[X,] = X
 type T[X,] = X
 
 <<< inside a Scala 3 indentation region
+dialect = scala3
+===
 def f =
   val x = compute(alpha, beta, gamma, delta)
   x

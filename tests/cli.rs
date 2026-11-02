@@ -4,8 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const UNFORMATTED: &str = "object A {\n  def f(x:Int)=x+1\n}\n";
-const FORMATTED: &str = "object A {\n  def f(x: Int) = x + 1\n}\n";
+const UNFORMATTED: &str = "object A:\n  def f(x:Int)=x+1\n";
+const FORMATTED: &str = "object A:\n  def f(x: Int) = x + 1\n";
 
 /// A file with `contents` in the test's own temporary directory.
 fn file(name: &str, contents: &str) -> PathBuf {

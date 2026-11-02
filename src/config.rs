@@ -27,7 +27,8 @@
 //!   replace the default include paths unless those are set as well.
 //! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
 //!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard`,
-//!   `allowPostfixStarVarargSplices` and `allowQuietSyntax`, also under `fileOverride`, whose patterns
+//!   `allowPostfixStarVarargSplices`, `allowQuietSyntax` and
+//!   `allowSignificantIndentation`, also under `fileOverride`, whose patterns
 //!   are tried longest first, as in scalafmt. The dialect is `scala3` when
 //!   none is named.
 
@@ -80,6 +81,9 @@ pub struct Dialect {
     /// `if c then a` for `if (c) a`, `while c do x` for `while (c) x`, and
     /// `for x <- xs do f(x)` for `for (x <- xs) f(x)`. Only Scala 3's.
     pub quiet_syntax: bool,
+    /// Indentation for braces: `class A:` for `class A {`, and `def f =`
+    /// with its body indented below for `def f = {`. Only Scala 3's.
+    pub significant_indentation: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -99,6 +103,7 @@ impl Dialect {
         question_mark_type_wildcard: true,
         postfix_star_vararg_splices: true,
         quiet_syntax: true,
+        significant_indentation: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -119,6 +124,7 @@ impl Dialect {
             question_mark_type_wildcard: new_syntax,
             postfix_star_vararg_splices: new_syntax,
             quiet_syntax: scala3,
+            significant_indentation: scala3,
         })
     }
 }
@@ -133,6 +139,7 @@ struct DialectSetting {
     question_mark_type_wildcard: Option<bool>,
     postfix_star_vararg_splices: Option<bool>,
     quiet_syntax: Option<bool>,
+    significant_indentation: Option<bool>,
 }
 
 impl DialectSetting {
@@ -159,6 +166,9 @@ impl DialectSetting {
         }
         if let Some(allow) = self.quiet_syntax {
             dialect.quiet_syntax = allow;
+        }
+        if let Some(allow) = self.significant_indentation {
+            dialect.significant_indentation = allow;
         }
         Ok(dialect)
     }
@@ -202,6 +212,9 @@ impl DialectSetting {
             }
             if let Some(allow) = flag("allowQuietSyntax")? {
                 setting.quiet_syntax = Some(allow);
+            }
+            if let Some(allow) = flag("allowSignificantIndentation")? {
+                setting.significant_indentation = Some(allow);
             }
         }
         Ok(setting)
@@ -845,6 +858,7 @@ mod tests {
             question_mark_type_wildcard: true,
             postfix_star_vararg_splices: true,
             quiet_syntax: true,
+            significant_indentation: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -852,9 +866,11 @@ mod tests {
             question_mark_type_wildcard: false,
             postfix_star_vararg_splices: false,
             quiet_syntax: false,
+            significant_indentation: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
+            significant_indentation: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
@@ -960,6 +976,7 @@ mod tests {
             assert!(main.star_wildcard_import && !main.as_for_import_rename);
             assert!(!main.quiet_syntax);
             assert_eq!(dialect("core/src/main/scala-2.12/cats/A.scala"), main);
+            // cats turns significant indentation off.
             let scala3 = Dialect {
                 quiet_syntax: true,
                 ..main

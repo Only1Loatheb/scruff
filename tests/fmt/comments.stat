@@ -157,6 +157,8 @@ val x = if a then b else /* no */ c
 val y = f( /* a */ x /* b */ )
 
 <<< no space between a comment and a following comma, semicolon or colon
+dialect = scala3
+===
 class A extends B /* b */ ,C, D
 val y = f(a /* a */ ,b)
 val z = 1 /* z */ ; val w = 2

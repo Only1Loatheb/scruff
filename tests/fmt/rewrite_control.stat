@@ -86,3 +86,69 @@ for {
   x <- xs
   y <- ys
 } yield x + y
+
+<<< plain Scala 2.13 gets braces around indented bodies
+dialect = scala213
+===
+def f =
+  if a then
+    b
+    c
+  else
+    d
+    e
+def g =
+  while c do
+    x
+    y
+def h =
+  for x <- xs do
+    f(x)
+    g(x)
+def i =
+  for
+    x <- xs
+  yield
+    val y = x
+    y
+>>>
+def f =
+  if (a) {
+    b
+    c
+  } else {
+    d
+    e
+  }
+def g =
+  while (c) {
+    x
+    y
+  }
+def h =
+  for (x <- xs) {
+    f(x)
+    g(x)
+  }
+def i =
+  for {
+    x <- xs
+  } yield {
+    val y = x
+    y
+  }
+
+<<< a single expression needs no braces in Scala 2.13
+dialect = scala213
+===
+def f =
+  if a then
+    b
+  else
+    c
+>>>
+def f =
+  if (a)
+    b
+  else
+    c

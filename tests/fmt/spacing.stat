@@ -47,6 +47,8 @@ def + : Int = 1
 def + : Int = 1
 
 <<< a quoted wildcard keeps its space before a colon
+dialect = scala3
+===
 def f(x: Expr[Any]) = x match
   case '{ $_ : Boolean } => 1
 >>>

@@ -79,6 +79,8 @@ x match {
 }
 
 <<< Scala 3 indented cases
+dialect = scala3
+===
 def f(x: Option[Int]) =
   x match
     case Some(value) => value
@@ -277,6 +279,8 @@ body match {
 }
 
 <<< complex (scala3/InlineTransparent.stat:94)
+dialect = scala3
+===
 inline def repro[T <: Int with Singleton  ,   U <: Int with Singleton]: Int = 
   inline erasedValue[T] match
      case _: 5 => 5

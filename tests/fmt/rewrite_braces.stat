@@ -1,0 +1,157 @@
+# Braces become indentation where Scala 3 allows it.
+dialect = scala3
+
+<<< class, object and definition bodies
+object A {
+  class B extends C {
+    def f = {
+      val x = 1
+      x
+    }
+  }
+}
+>>>
+object A:
+  class B extends C:
+    def f =
+      val x = 1
+      x
+
+<<< match and case bodies
+def f(x: Int) = x match {
+  case 1 => {
+    a()
+    b()
+  }
+  case _ => c
+}
+>>>
+def f(x: Int) = x match
+  case 1 =>
+    a()
+    b()
+  case _ => c
+
+<<< if, else, try, catch, finally
+def f =
+  if (c) {
+    a
+  } else {
+    b
+  }
+def g =
+  try {
+    a
+  } catch {
+    case e: Exception => b
+  } finally {
+    c
+  }
+>>>
+def f =
+  if c then
+    a
+  else
+    b
+def g =
+  try
+    a
+  catch
+    case e: Exception => b
+  finally
+    c
+
+<<< for braces
+for {
+  x <- xs
+  y <- ys
+} yield x + y
+>>>
+for
+  x <- xs
+  y <- ys
+yield x + y
+
+<<< comments stay with their lines
+class A { // a note
+  val x = 1
+  // the end
+}
+val y = 2
+>>>
+class A: // a note
+  val x = 1
+  // the end
+val y = 2
+
+<<< braces stay where Scala 3 needs them or the layout is in doubt
+def f = { a }
+val g = {
+  a
+}.map(h)
+xs.foreach { x =>
+  println(x)
+}
+new A {
+  val x = 1
+}
+>>>
+def f = { a }
+val g = {
+  a
+}.map(h)
+xs.foreach { x =>
+  println(x)
+}
+new A {
+  val x = 1
+}
+
+<<< Scala 2 keeps its braces
+dialect = scala213source3
+===
+object A {
+  val x = 1
+}
+>>>
+object A {
+  val x = 1
+}
+
+<<< plain Scala 2.13 gets braces back
+dialect = scala213
+===
+object A:
+  def f =
+    val x = 1
+    x // the result
+  def g =
+    try
+      a
+      b
+    catch
+      case e: Exception => c
+    finally
+      d
+  def h(x: Int) = x match
+    case 1 => "one"
+    case _ => "many"
+>>>
+object A {
+  def f = {
+    val x = 1
+    x // the result
+  }
+  def g =
+    try {
+      a
+      b
+    } catch {
+      case e: Exception => c
+    } finally
+      d
+  def h(x: Int) = x match {
+    case 1 => "one"
+    case _ => "many"
+  }
+}

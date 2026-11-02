@@ -21,14 +21,164 @@
 
 use crate::config::Dialect;
 use crate::lossless_tree::{
-    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree, is_type_wildcard_place,
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Tree,
+    check_equivalent_trees, is_type_wildcard_place, parse,
 };
 
-/// The source rewritten for `dialect`, or `None` if nothing changes.
-pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
+/// A rewrite tree-sitter-scala reads as the same code.
+pub(super) struct Rewritten {
+    pub(super) tree: Tree,
+    /// How many constructs were left as written because, rewritten, they
+    /// were read as other code. Read by the corpus check.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(super) dropped: usize,
+}
+
+/// A replacement of a range of the source.
+type Edit = (TextRange, String);
+
+/// One construct's edits, which are kept or left out together, and the
+/// range they're in.
+struct Unit {
+    range: TextRange,
+    edits: Vec<Edit>,
+}
+
+/// How many times a rewrite is parsed again after leaving out a construct
+/// that tree-sitter-scala read differently.
+const TRIES: usize = 16;
+
+/// The source rewritten for `dialect` and parsed, or `None` if nothing
+/// changes. Each construct's edits are kept only if the result has no
+/// syntax errors and is equivalent: where it isn't, the innermost construct
+/// around the first difference is left as written and the rest tried again.
+pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<Rewritten> {
     let text = tree.syntax().text();
-    let mut edits: Vec<(TextRange, String)> = Vec::new();
+    let units = units(tree, dialect);
+    let mut kept = vec![true; units.len()];
+    for dropped in 0..TRIES {
+        let mut chosen: Vec<(usize, &Edit)> = units
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| kept[i])
+            .flat_map(|(i, unit)| unit.edits.iter().map(move |edit| (i, edit)))
+            .collect();
+        if chosen.is_empty() {
+            return None;
+        }
+        // Units come outer first: where two insert at the same place, as two
+        // `}` after the same line, the inner one's goes first.
+        chosen.sort_by_key(|&(unit, (range, _))| {
+            (range.start(), range.end(), std::cmp::Reverse(unit))
+        });
+        let chosen: Vec<&Edit> = chosen.into_iter().map(|(_, edit)| edit).collect();
+        let rewritten = parse(&apply(text, &chosen));
+        // Where the problem is in the original: a syntax error's range, or
+        // the first difference.
+        let at = match rewritten.errors().first() {
+            Some(error) => TextRange::new(
+                original_offset(&chosen, error.range().start()),
+                original_offset(&chosen, error.range().end()),
+            ),
+            None => match check_equivalent_trees(tree, &rewritten) {
+                Ok(()) => {
+                    return Some(Rewritten {
+                        tree: rewritten,
+                        dropped,
+                    });
+                }
+                Err(difference) => {
+                    let offset = match (difference.before, difference.after) {
+                        (Some(before), _) => before.offset,
+                        (None, Some(after)) => original_offset(&chosen, after.offset),
+                        (None, None) => return None,
+                    };
+                    TextRange::empty(offset)
+                }
+            },
+        };
+        // The innermost construct it touches, or else the nearest before
+        // it, or after it.
+        let kept_units = || (0..units.len()).filter(|&i| kept[i]);
+        let touching = kept_units()
+            .filter(|&i| {
+                units[i].range.contains_inclusive(at.start()) || at.contains_range(units[i].range)
+            })
+            .min_by_key(|&i| units[i].range.len());
+        let before = || {
+            kept_units()
+                .filter(|&i| units[i].range.start() <= at.start())
+                .max_by_key(|&i| units[i].range.start())
+        };
+        let after = || kept_units().min_by_key(|&i| units[i].range.start());
+        let drop = touching.or_else(before).or_else(after)?;
+        kept[drop] = false;
+    }
+    None
+}
+
+/// Whether `dialect` has anything to rewrite in `tree`, before checking
+/// how tree-sitter-scala reads the result.
+pub(super) fn changes(tree: &Tree, dialect: Dialect) -> bool {
+    !units(tree, dialect).is_empty()
+}
+
+/// `text` with `edits`, sorted by where they start, made.
+fn apply(text: &str, edits: &[&Edit]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (range, replacement) in edits {
+        out.push_str(&text[copied..usize::from(range.start())]);
+        out.push_str(replacement);
+        copied = usize::from(range.end());
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// Where an offset in the text `edits` made was in the original.
+fn original_offset(edits: &[&Edit], offset: TextSize) -> TextSize {
+    let offset = i64::from(u32::from(offset));
+    let mut shift: i64 = 0;
+    for (range, replacement) in edits {
+        let start = i64::from(u32::from(range.start())) + shift;
+        if offset < start {
+            break;
+        }
+        if offset < start + replacement.len() as i64 {
+            return range.start();
+        }
+        shift += replacement.len() as i64 - i64::from(u32::from(range.len()));
+    }
+    TextSize::from(u32::try_from(offset - shift).unwrap_or(0))
+}
+
+/// Every construct's edits for `dialect`.
+fn units(tree: &Tree, dialect: Dialect) -> Vec<Unit> {
+    let text = tree.syntax().text();
+    let mut units = Vec::new();
     for node in tree.syntax().descendants() {
+        let mut edits = Vec::new();
+        edits_for(tree, text, dialect, node, &mut edits);
+        if !edits.is_empty() {
+            let range = edits
+                .iter()
+                .fold(node.text_range(), |range, (edit, _)| range.cover(*edit));
+            units.push(Unit { range, edits });
+        }
+    }
+    units
+}
+
+/// The edits for `dialect` that `node` makes, added to `edits`.
+fn edits_for(
+    tree: &Tree,
+    text: &str,
+    dialect: Dialect,
+    node: SyntaxNode<'_>,
+    edits: &mut Vec<Edit>,
+) {
+    {
         let tokens = || {
             node.children_with_tokens()
                 .filter_map(NodeOrToken::into_token)
@@ -71,6 +221,25 @@ pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
                         .all(|(range, _)| tree.verbatim_at(range.start()).is_none())
                 });
                 edits.extend(control.into_iter().flatten());
+                if node.kind() == SyntaxKind::ForExpression && dialect.significant_indentation {
+                    edits.extend(braces(tree, node).into_iter().flatten());
+                }
+            }
+            SyntaxKind::Block
+            | SyntaxKind::CaseBlock
+            | SyntaxKind::TemplateBody
+            | SyntaxKind::EnumBody
+                if dialect.significant_indentation =>
+            {
+                edits.extend(braces(tree, node).into_iter().flatten());
+            }
+            SyntaxKind::IndentedBlock
+            | SyntaxKind::IndentedCases
+            | SyntaxKind::TemplateBody
+            | SyntaxKind::EnumBody
+                if !dialect.significant_indentation =>
+            {
+                edits.extend(braces_back(tree, node).into_iter().flatten());
             }
             SyntaxKind::ArrowRenamedIdentifier if dialect.as_for_import_rename => {
                 for token in tokens().filter(|t| matches!(t.text(), "=>" | "\u{21D2}")) {
@@ -82,7 +251,7 @@ pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
                 // `import foo as f` has no Scala 2 form: braces need a path
                 // before them.
                 if arrows.is_empty() || !after_a_path(node) {
-                    continue;
+                    return;
                 }
                 for token in arrows {
                     edits.push((token.text_range(), spaced(text, &token, "=>")));
@@ -103,19 +272,6 @@ pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
             _ => {}
         }
     }
-    if edits.is_empty() {
-        return None;
-    }
-    edits.sort_by_key(|(range, _)| range.start());
-    let mut out = String::with_capacity(text.len());
-    let mut copied = 0;
-    for (range, replacement) in edits {
-        out.push_str(&text[copied..usize::from(range.start())]);
-        out.push_str(&replacement);
-        copied = usize::from(range.end());
-    }
-    out.push_str(&text[copied..]);
-    Some(out)
 }
 
 /// Whether a rename comes after a path and its `.`, as `c` in
@@ -196,8 +352,8 @@ pub(super) fn splice(
 /// The edits that write a control expression, `node`, in Scala 3's syntax
 /// when `quiet`, or else in Scala 2's. None if it's already written so, or
 /// if it's left as written: where a line break or comment is in the way,
-/// or where a condition starts with `(`, so taking the parentheses away
-/// could leave it looking like the old syntax.
+/// or where a condition starts with `(` or `{`, so taking the parentheses
+/// away could leave it looking like the old syntax or a block.
 pub(super) fn control(
     text: &str,
     node: SyntaxNode<'_>,
@@ -314,7 +470,7 @@ pub(super) fn control(
             let inner = code_range(&inner)?;
             if !one_line(between(open.text_range(), inner))
                 || !one_line(between(inner, close.text_range()))
-                || text[inner].starts_with('(')
+                || text[inner].starts_with(['(', '{'])
             {
                 return None;
             }
@@ -353,6 +509,310 @@ pub(super) fn control(
         _ => return None,
     }
     Some(edits)
+}
+
+/// The edits that take a construct's braces out for Scala 3's indentation:
+/// `def f = {` to `def f =`, `x match {` to `x match`, `class A {` to
+/// `class A:`, and `for {` ... `} yield` to `for` ... `yield`, with the `}`
+/// line gone, or the `}` before `else`, `catch`, `finally` or `yield`.
+/// None where the layout leaves any doubt: unless `{` ends its line, `}`
+/// starts its own, every line between is deeper than the `}` and the line
+/// the construct starts on, and the next line isn't deeper than the `}`.
+pub(super) fn braces(tree: &Tree, node: SyntaxNode<'_>) -> Option<Vec<(TextRange, String)>> {
+    let text = tree.syntax().text();
+    let kind = node.kind();
+    let (open, close) = if kind == SyntaxKind::ForExpression {
+        let token = |t: &str| {
+            node.children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .find(|x| x.text() == t && x.field_name() == Some("enumerators"))
+        };
+        (token("{")?, token("}")?)
+    } else {
+        let mut children = node.non_trivia_children();
+        let open = children.next()?.into_token()?;
+        let close = children.last()?.into_token()?;
+        (open, close)
+    };
+    if open.text() != "{" || close.text() != "}" {
+        return None;
+    }
+    let before = previous_code(open)?;
+    // What the construct belongs to: it starts the line its body is placed
+    // from.
+    let owner = if kind == SyntaxKind::ForExpression {
+        node
+    } else {
+        node.parent()?
+    };
+    let allowed = match (kind, owner.kind(), before.text()) {
+        (SyntaxKind::ForExpression, _, "for") => true,
+        (SyntaxKind::Block, SyntaxKind::CaseClause, "=>")
+        | (SyntaxKind::Block, SyntaxKind::IfExpression, "then" | "else" | ")")
+        | (SyntaxKind::Block, SyntaxKind::WhileExpression, "do" | ")")
+        | (SyntaxKind::Block, SyntaxKind::ForExpression, "do" | "yield" | ")")
+        | (SyntaxKind::Block, SyntaxKind::TryExpression, "try")
+        | (SyntaxKind::Block, SyntaxKind::FinallyClause, "finally")
+        | (SyntaxKind::CaseBlock, SyntaxKind::MatchExpression, "match")
+        | (SyntaxKind::CaseBlock, SyntaxKind::CatchClause, "catch") => true,
+        (SyntaxKind::Block, owner, "=") => matches!(
+            owner,
+            SyntaxKind::FunctionDefinition | SyntaxKind::ValDefinition | SyntaxKind::VarDefinition
+        ),
+        (SyntaxKind::TemplateBody | SyntaxKind::EnumBody, owner, _) => matches!(
+            owner,
+            SyntaxKind::ClassDefinition
+                | SyntaxKind::ObjectDefinition
+                | SyntaxKind::TraitDefinition
+                | SyntaxKind::EnumDefinition
+        ),
+        _ => false,
+    };
+    if !allowed {
+        return None;
+    }
+    let at = |offset: TextSize| usize::from(offset);
+    let line_start = |offset: TextSize| text[..at(offset)].rfind('\n').map_or(0, |i| i + 1);
+    let indent = |offset: TextSize| {
+        let start = line_start(offset);
+        text[start..].len() - text[start..].trim_start_matches(' ').len()
+    };
+    let blank = |from: TextSize, to: TextSize| text[at(from)..at(to)].trim().is_empty();
+    // Only spaces between the brace and what it follows, `{` ending its line
+    // and `}` starting its own, with something between.
+    let first = next_code(open)?;
+    let last = previous_code(close)?;
+    if first == close
+        || !blank(before.text_range().end(), open.text_range().start())
+        || text[at(before.text_range().end())..at(open.text_range().start())].contains('\n')
+        || !text[at(open.text_range().end())..at(first.text_range().start())].contains('\n')
+        || !text[at(last.text_range().end())..at(close.text_range().start())].contains('\n')
+        || !blank(
+            TextSize::try_from(line_start(close.text_range().start())).ok()?,
+            close.text_range().start(),
+        )
+    {
+        return None;
+    }
+    // Every line between deeper than the `}` and the construct's first line.
+    let owner_start = owner.tokens().find(|t| !t.is_trivia())?;
+    let floor = indent(close.text_range().start()).max(indent(owner_start.text_range().start()));
+    if !lines_deeper(
+        tree,
+        at(open.text_range().end()),
+        line_start(close.text_range().start()),
+        floor,
+    ) {
+        return None;
+    }
+    // Without braces, a `case` clause's body must be deeper than its `case`.
+    if kind == SyntaxKind::CaseBlock {
+        for clause in node
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::CaseClause)
+        {
+            let first = clause.tokens().find(|t| !t.is_trivia())?;
+            let end = clause.last_code_token()?.text_range().end();
+            let width = indent(first.text_range().start());
+            if !lines_deeper(tree, at(first.text_range().end()), at(end), width) {
+                return None;
+            }
+        }
+    }
+    let mut edits = Vec::new();
+    let opening = match kind {
+        // `object #:: :`, since `#:::` would be one name.
+        SyntaxKind::TemplateBody | SyntaxKind::EnumBody
+            if before
+                .text()
+                .chars()
+                .next_back()
+                .is_some_and(is_operator_char) =>
+        {
+            " :"
+        }
+        SyntaxKind::TemplateBody | SyntaxKind::EnumBody => ":",
+        _ => "",
+    };
+    let gap = TextRange::new(before.text_range().end(), open.text_range().end());
+    edits.push((gap, opening.to_string()));
+    // After the `}`: a keyword that goes on, or nothing on its line and no
+    // deeper line next.
+    let after = next_code(close);
+    let same_line = after.is_some_and(|a| {
+        !text[at(close.text_range().end())..at(a.text_range().start())].contains('\n')
+    });
+    match after {
+        Some(after) if same_line => {
+            let goes_on = matches!(after.text(), "else" | "catch" | "finally" | "yield");
+            if !goes_on || !blank(close.text_range().end(), after.text_range().start()) {
+                return None;
+            }
+            let range = TextRange::new(close.text_range().start(), after.text_range().start());
+            edits.push((range, String::new()));
+        }
+        // A `for`'s enumerators end at its `yield`.
+        _ if kind == SyntaxKind::ForExpression => return None,
+        _ => {
+            let eol = text[at(close.text_range().end())..]
+                .find('\n')
+                .map_or(text.len(), |i| at(close.text_range().end()) + i);
+            if !text[at(close.text_range().end())..eol].trim().is_empty()
+                || after.is_some_and(|a| {
+                    indent(a.text_range().start()) > indent(close.text_range().start())
+                })
+            {
+                return None;
+            }
+            let line_break = text[..at(close.text_range().start())].rfind('\n')?;
+            let range = TextRange::new(
+                TextSize::try_from(line_break).ok()?,
+                close.text_range().end(),
+            );
+            edits.push((range, String::new()));
+        }
+    }
+    Some(edits)
+}
+
+/// Whether every line starting in `start..end` is indented deeper than
+/// `width`, with spaces: not the line `start` is on, blank lines, lines
+/// inside a string or comment, or a closing bracket's, which ends what it
+/// closes wherever it is.
+fn lines_deeper(tree: &Tree, start: usize, end: usize, width: usize) -> bool {
+    let text = tree.syntax().text();
+    let mut offset = start;
+    text[start..end]
+        .split_inclusive('\n')
+        .enumerate()
+        .all(|(i, line)| {
+            let line_start = offset;
+            offset += line.len();
+            let content = line.trim_start_matches(' ');
+            let inside = TextSize::try_from(line_start)
+                .ok()
+                .and_then(|s| tree.verbatim_at(s).map(|v| v.range.start() < s))
+                .unwrap_or(false);
+            i == 0
+                || content.trim().is_empty()
+                || inside
+                || content.starts_with(['}', ')', ']'])
+                || (!content.starts_with('\t') && line.len() - content.len() > width)
+        })
+}
+
+/// The edits that put braces around an indented construct, `node`, for a
+/// dialect without significant indentation: `def f =` + statements to
+/// `def f = {` + statements + `}`, `x match` + cases to `x match {` ... `}`,
+/// and `class A:` to `class A {` ... `}`. The `}` goes on a line of its own
+/// at the width of the construct's first line, or before an `else`,
+/// `catch`, `finally` or `yield` on the next line. None where Scala 2 needs
+/// no braces, a single expression, or where the construct isn't one that
+/// can have them, or ends in an end marker, which Scala 2 doesn't have.
+pub(super) fn braces_back(tree: &Tree, node: SyntaxNode<'_>) -> Option<Vec<(TextRange, String)>> {
+    let text = tree.syntax().text();
+    let kind = node.kind();
+    let owner = node.parent()?;
+    let statements: Vec<_> = node.region_statements().collect();
+    let first = node.tokens().find(|t| t.owns_trivia())?;
+    let last = node.last_code_token()?;
+    let opener = match kind {
+        // `class A:`'s colon is the template body's first token.
+        SyntaxKind::TemplateBody | SyntaxKind::EnumBody => {
+            if first.text() != ":" {
+                return None;
+            }
+            first
+        }
+        _ => previous_code(first)?,
+    };
+    let allowed = match (kind, owner.kind(), opener.text()) {
+        (SyntaxKind::IndentedBlock, SyntaxKind::IfExpression, "then" | "else" | ")")
+        | (SyntaxKind::IndentedBlock, SyntaxKind::WhileExpression, "do" | ")")
+        | (SyntaxKind::IndentedBlock, SyntaxKind::ForExpression, "do" | "yield" | ")" | "}")
+        | (SyntaxKind::IndentedBlock, SyntaxKind::TryExpression, "try")
+        | (SyntaxKind::IndentedBlock, SyntaxKind::FinallyClause, "finally")
+        | (SyntaxKind::IndentedCases, SyntaxKind::MatchExpression, "match")
+        | (SyntaxKind::IndentedCases, SyntaxKind::CatchClause, "catch") => true,
+        (SyntaxKind::IndentedBlock, owner, "=") => matches!(
+            owner,
+            SyntaxKind::FunctionDefinition | SyntaxKind::ValDefinition | SyntaxKind::VarDefinition
+        ),
+        (SyntaxKind::TemplateBody | SyntaxKind::EnumBody, owner, ":") => matches!(
+            owner,
+            SyntaxKind::ClassDefinition
+                | SyntaxKind::ObjectDefinition
+                | SyntaxKind::TraitDefinition
+                | SyntaxKind::EnumDefinition
+        ),
+        _ => false,
+    };
+    // A block of one expression needs no braces in Scala 2.
+    let one_expression = kind == SyntaxKind::IndentedBlock
+        && statements.len() == 1
+        && !statements[0].kind().name().ends_with("_definition")
+        && !statements[0].kind().name().ends_with("_declaration")
+        && statements[0].kind() != SyntaxKind::ImportDeclaration;
+    let at = |offset: TextSize| usize::from(offset);
+    let starts_line = |token: SyntaxToken<'_>| {
+        text[..at(token.text_range().start())]
+            .trim_end_matches([' ', '\t'])
+            .ends_with('\n')
+    };
+    let body_first = statements.first().and_then(|s| match s {
+        NodeOrToken::Node(n) => n.tokens().find(|t| t.owns_trivia()),
+        NodeOrToken::Token(t) => Some(*t),
+    })?;
+    let after = next_code(last);
+    // An end marker, which the `}` would have to stand for.
+    let ends_marked = after.is_some_and(|a| a.text() == "end")
+        || owner.children().any(|c| c.kind() == SyntaxKind::EndMarker);
+    if !allowed || one_expression || ends_marked || !starts_line(body_first) {
+        return None;
+    }
+    let line_start = |offset: TextSize| text[..at(offset)].rfind('\n').map_or(0, |i| i + 1);
+    let owner_first = owner.tokens().find(|t| t.owns_trivia())?;
+    let start = line_start(owner_first.text_range().start());
+    let width = text[start..].len() - text[start..].trim_start_matches(' ').len();
+    let mut edits = Vec::new();
+    match kind {
+        SyntaxKind::TemplateBody | SyntaxKind::EnumBody => {
+            edits.push((opener.text_range(), " {".to_string()));
+        }
+        _ => {
+            let end = opener.text_range().end();
+            edits.push((TextRange::new(end, end), " {".to_string()));
+        }
+    }
+    match after {
+        // `} else` where the `else` starts the next line.
+        Some(after)
+            if matches!(after.text(), "else" | "catch" | "finally" | "yield")
+                && starts_line(after) =>
+        {
+            let start = after.text_range().start();
+            edits.push((TextRange::new(start, start), "} ".to_string()));
+        }
+        _ => {
+            // After the rest of the last line, comments included.
+            let end = at(last.text_range().end());
+            let eol = text[end..].find('\n').map_or(text.len(), |i| end + i);
+            let eol = TextSize::try_from(eol).ok()?;
+            let close = format!("\n{}}}", " ".repeat(width));
+            edits.push((TextRange::new(eol, eol), close));
+        }
+    }
+    Some(edits)
+}
+
+/// The code token before `token`, skipping trivia.
+fn previous_code<'t>(token: SyntaxToken<'t>) -> Option<SyntaxToken<'t>> {
+    std::iter::successors(token.prev_token(), SyntaxToken::prev_token).find(|t| t.owns_trivia())
+}
+
+/// The code token after `token`, skipping trivia.
+fn next_code<'t>(token: SyntaxToken<'t>) -> Option<SyntaxToken<'t>> {
+    std::iter::successors(token.next_token(), SyntaxToken::next_token).find(|t| t.owns_trivia())
 }
 
 /// Whether tree-sitter-scala reads `node` differently in one of the two
@@ -493,17 +953,28 @@ mod tests {
     use super::*;
     use crate::lossless_tree::parse;
 
-    const NEW: Dialect = Dialect::SCALA3;
+    /// Scala 3 with braces kept, for the rewrites besides theirs.
+    const NEW: Dialect = Dialect {
+        significant_indentation: false,
+        ..Dialect::SCALA3
+    };
+    const SCALA3: Dialect = Dialect::SCALA3;
     const OLD: Dialect = Dialect {
         star_wildcard_import: false,
         as_for_import_rename: false,
         question_mark_type_wildcard: false,
         postfix_star_vararg_splices: false,
         quiet_syntax: false,
+        significant_indentation: false,
     };
 
+    /// The rewritten text, if anything changed.
+    fn changed(source: &str, dialect: Dialect) -> Option<String> {
+        rewrite(&parse(source), dialect).map(|r| r.tree.syntax().text().to_string())
+    }
+
     fn rewritten(source: &str, dialect: Dialect) -> String {
-        rewrite(&parse(source), dialect).unwrap_or_else(|| source.to_string())
+        changed(source, dialect).unwrap_or_else(|| source.to_string())
     }
 
     #[test]
@@ -535,7 +1006,7 @@ mod tests {
             "val f = (_: Int) + 1\n",
             "def g(x: Int => Int) = x\n",
         ] {
-            assert_eq!(rewrite(&parse(source), NEW), None, "{source}");
+            assert_eq!(changed(source, NEW), None, "{source}");
         }
     }
 
@@ -562,15 +1033,12 @@ mod tests {
             rewritten("import a.{b => c, _}\n", star_only),
             "import a.{b => c, *}\n"
         );
-        assert_eq!(rewrite(&parse("import a.{b => c, _}\n"), OLD), None);
+        assert_eq!(changed("import a.{b => c, _}\n", OLD), None);
         let no_question_mark = Dialect {
             question_mark_type_wildcard: false,
             ..NEW
         };
-        assert_eq!(
-            rewrite(&parse("val a: List[_] = b\n"), no_question_mark),
-            None
-        );
+        assert_eq!(changed("val a: List[_] = b\n", no_question_mark), None);
     }
 
     #[test]
@@ -585,9 +1053,9 @@ mod tests {
             rewritten("import a.b as c, d.e as _\n", scala2),
             "import a.{b => c}, d.{e => _}\n"
         );
-        assert_eq!(rewrite(&parse("import a.{b => c, _}\n"), scala2), None);
+        assert_eq!(changed("import a.{b => c, _}\n", scala2), None);
         // No Scala 2 form without a path.
-        assert_eq!(rewrite(&parse("import foo as f\n"), scala2), None);
+        assert_eq!(changed("import foo as f\n", scala2), None);
     }
 
     #[test]
@@ -622,11 +1090,11 @@ mod tests {
             "val f = g(_)\n",
             "val a: List[?] = b\n",
         ] {
-            assert_eq!(rewrite(&parse(source), NEW), None, "{source}");
+            assert_eq!(changed(source, NEW), None, "{source}");
         }
         // Without the new syntax, `?` is a name: kind-projector's
         // placeholder here.
-        assert_eq!(rewrite(&parse("val a: F[Either[A, ?]] = b\n"), OLD), None);
+        assert_eq!(changed("val a: F[Either[A, ?]] = b\n", OLD), None);
     }
 
     #[test]
@@ -652,9 +1120,9 @@ mod tests {
             // A comment in the way.
             "f(xs /* c */ : _*)\n",
         ] {
-            assert_eq!(rewrite(&parse(same), NEW), None, "{same}");
+            assert_eq!(changed(same, NEW), None, "{same}");
         }
-        assert_eq!(rewrite(&parse("x match { case Seq(_*) => }\n"), OLD), None);
+        assert_eq!(changed("x match { case Seq(_*) => }\n", OLD), None);
     }
 
     #[test]
@@ -683,7 +1151,7 @@ mod tests {
             rewritten("if (a /* x */) b\n", NEW),
             "if a /* x */ then b\n"
         );
-        assert_eq!(rewrite(&parse("if a /* x */ then b\n"), OLD), None);
+        assert_eq!(changed("if a /* x */ then b\n", OLD), None);
         // Written without spaces.
         assert_eq!(rewritten("if(c)a\n", NEW), "if c then a\n");
         assert_eq!(rewritten("while(c){x}\n", NEW), "while c do {x}\n");
@@ -697,7 +1165,7 @@ mod tests {
         // Braces stay in Scala 3, and come back in Scala 2 for a `for`
         // over several lines.
         let braced = "for {\n  x <- xs\n  y <- ys\n} yield x\n";
-        assert_eq!(rewrite(&parse(braced), NEW), None);
+        assert_eq!(changed(braced, NEW), None);
         assert_eq!(
             rewritten("for\n  x <- xs\n  y <- ys\nyield x\n", OLD),
             braced
@@ -713,27 +1181,148 @@ mod tests {
         for source in [
             // A line break inside the parentheses.
             "if (\n  c\n) a\n",
-            // A condition starting with `(`.
+            // A condition starting with `(` or `{`.
             "if ((a, b) == c) d\n",
+            "while ({\n  a\n  b\n}) ()\n",
             "do x while (c)\n",
             // What tree-sitter-scala would read differently.
             "for (x <- xs) x match {\n  case _ =>\n}\n",
-            "def f =\n  if (c)\n    a\n  end if\n",
         ] {
-            assert_eq!(rewrite(&parse(source), NEW), None, "{source}");
+            assert_eq!(changed(source, NEW), None, "{source}");
         }
+        // Written with indentation, so in full Scala 3.
+        assert_eq!(changed("def f =\n  if (c)\n    a\n  end if\n", SCALA3), None);
         // Neither `if`: the outer one would take the `else`.
-        assert_eq!(rewrite(&parse("if (a) x = if (b) 1 else 2\n"), NEW), None);
+        assert_eq!(changed("if (a) x = if (b) 1 else 2\n", NEW), None);
         let source3 = Dialect {
             quiet_syntax: false,
             ..NEW
         };
-        assert_eq!(rewrite(&parse("if (c) a\n"), source3), None);
+        assert_eq!(changed("if (c) a\n", source3), None);
         for source in [
             "def f =\n  if c then\n    a\n  end if\n",
             "inline if c then a\n",
         ] {
-            assert_eq!(rewrite(&parse(source), OLD), None, "{source}");
+            assert_eq!(changed(source, OLD), None, "{source}");
+        }
+    }
+
+    #[test]
+    fn optional_braces() {
+        for (old, new) in [
+            (
+                "def f = {\n  a\n  b\n}\nval x = 1\n",
+                "def f =\n  a\n  b\nval x = 1\n",
+            ),
+            ("class A {\n  val x = 1\n}\n", "class A:\n  val x = 1\n"),
+            (
+                "class A extends B with C {\n  val x = 1\n}\n",
+                "class A extends B with C:\n  val x = 1\n",
+            ),
+            ("enum E {\n  case A, B\n}\n", "enum E:\n  case A, B\n"),
+            ("x match {\n  case a => 1\n}\n", "x match\n  case a => 1\n"),
+            (
+                "if c then {\n  a\n} else {\n  b\n}\n",
+                "if c then\n  a\nelse\n  b\n",
+            ),
+            (
+                "try {\n  a\n} catch {\n  case e => b\n} finally {\n  c\n}\n",
+                "try\n  a\ncatch\n  case e => b\nfinally\n  c\n",
+            ),
+            (
+                "for {\n  x <- xs\n  y <- ys\n} yield x\n",
+                "for\n  x <- xs\n  y <- ys\nyield x\n",
+            ),
+            (
+                "x match {\n  case a => {\n    b\n    c\n  }\n}\n",
+                "x match\n  case a =>\n    b\n    c\n",
+            ),
+            (
+                "object #:: {\n  val x = 1\n}\n",
+                "object #:: :\n  val x = 1\n",
+            ),
+            // A comment after `{` stays on its line.
+            ("def f = { // c\n  a\n}\n", "def f = // c\n  a\n"),
+            // Old control syntax becomes new too.
+            ("if (c) {\n  a\n}\n", "if c then\n  a\n"),
+        ] {
+            assert_eq!(rewritten(old, SCALA3), new, "{old}");
+            assert_eq!(
+                crate::lossless_tree::check_equivalent(old, new),
+                Ok(()),
+                "{old}"
+            );
+        }
+    }
+
+    #[test]
+    fn braces_left_as_written() {
+        for source in [
+            // On one line.
+            "def f = { a }\n",
+            // Something after `}`.
+            "def f = {\n  a\n}.map(g)\n",
+            "val x = {\n  a\n} + 1\n",
+            "def f = {\n  a\n} // c\n",
+            // Something before `}` on its line, or after `{` on its.
+            "def f = {\n  a }\n",
+            "def f = { a\n}\n",
+            // A line no deeper than the `}`.
+            "def f = {\na\n}\n",
+            // A deeper line after the `}`.
+            "  def f = {\n    a\n  }\n    b\n",
+            // Empty.
+            "class A {\n}\n",
+            // A `for` without `yield` after its enumerators.
+            "for {\n  x <- xs\n}\n{\n  f(x)\n}\n",
+            // Not where Scala 3 allows indentation for braces.
+            "f {\n  a\n}\n",
+            "xs.map { x =>\n  x\n}\n",
+            "new A {\n  val x = 1\n}\n",
+            "val x = {\n  a\n}\n".replace("val x = ", "{\n").as_str(),
+        ] {
+            let changed = changed(source, SCALA3);
+            assert!(
+                changed
+                    .as_deref()
+                    .is_none_or(|c| c.contains('{') || !source.contains('{')),
+                "{source:?} became {changed:?}"
+            );
+        }
+        assert_eq!(changed("class A {\n  val x = 1\n}\n", NEW), None);
+    }
+
+    #[test]
+    fn braces_back() {
+        for (new, old) in [
+            (
+                "def f =\n  a\n  b\nval x = 1\n",
+                "def f = {\n  a\n  b\n}\nval x = 1\n",
+            ),
+            ("class A:\n  val x = 1\n", "class A {\n  val x = 1\n}\n"),
+            ("x match\n  case a => 1\n", "x match {\n  case a => 1\n}\n"),
+            (
+                "if c then\n  a\n  b\nelse\n  d\n  e\n",
+                "if (c) {\n  a\n  b\n} else {\n  d\n  e\n}\n",
+            ),
+            // A comment after the last statement stays on its line.
+            ("def f =\n  a\n  b // c\n", "def f = {\n  a\n  b // c\n}\n"),
+            // Nested, each `}` at its own width.
+            (
+                "object A:\n  def f = x match\n    case a => 1\n",
+                "object A {\n  def f = x match {\n    case a => 1\n  }\n}\n",
+            ),
+        ] {
+            assert_eq!(rewritten(new, OLD), old, "{new}");
+        }
+        for same in [
+            // One expression needs no braces.
+            "def f =\n  a\n",
+            "if (c)\n  a\nelse\n  b\n",
+            // Scala 2 has no end markers.
+            "def f =\n  a\n  b\nend f\n",
+        ] {
+            assert_eq!(changed(same, OLD), None, "{same}");
         }
     }
 

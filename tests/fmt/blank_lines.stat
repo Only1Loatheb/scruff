@@ -91,6 +91,8 @@ object A {
 }
 
 <<< a nested function is inside too
+dialect = scala3
+===
 object A:
   def f =
     def g = 1

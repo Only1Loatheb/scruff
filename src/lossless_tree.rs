@@ -9,7 +9,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 pub(crate) use equivalence::is_type_wildcard_place;
-pub use equivalence::{Difference, DifferenceKind, Location, check_equivalent};
+pub use equivalence::{
+    Difference, DifferenceKind, Location, check_equivalent, check_equivalent_trees,
+};
 pub use indentation::RegionProblem;
 pub use syntax_kind::SyntaxKind;
 pub use text_size::{TextRange, TextSize};

@@ -110,16 +110,33 @@ fn format_with(
     rules: Rules,
     style: Style,
 ) -> Result<String, FormatError> {
+    let once = format_once(source, options, rules, style)?;
+    // Breaking a line can leave something to rewrite, as braces around a
+    // block that no longer fits on one: a second pass rewrites it, so that
+    // formatting the result changes nothing.
+    if once != source
+        && rewrite::changes(&parse(&once), options.dialect)
+        && let Ok(twice) = format_once(&once, options, rules, style)
+        && check_equivalent(source, &twice).is_ok()
+    {
+        return Ok(twice);
+    }
+    Ok(once)
+}
+
+fn format_once(
+    source: &str,
+    options: &FormatOptions,
+    rules: Rules,
+    style: Style,
+) -> Result<String, FormatError> {
     let tree = parse(source);
     if !tree.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
     }
-    // Rewritten to the dialect's syntax first, unless the result doesn't
-    // parse cleanly. The result is still checked against `source`.
-    let tree = rewrite::rewrite(&tree, options.dialect)
-        .map(|text| parse(&text))
-        .filter(|rewritten| rewritten.errors().is_empty())
-        .unwrap_or(tree);
+    // Rewritten to the dialect's syntax first, where tree-sitter-scala reads
+    // the result as the same code.
+    let tree = rewrite::rewrite(&tree, options.dialect).map_or(tree, |r| r.tree);
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
@@ -1540,6 +1557,14 @@ mod tests {
         format(source, &FormatOptions::default()).unwrap_or_else(|e| panic!("{e}"))
     }
 
+    /// Options for Scala 2.13, which keeps braces.
+    fn scala2() -> FormatOptions {
+        FormatOptions {
+            dialect: crate::config::Dialect::named("scala213").unwrap(),
+            ..FormatOptions::default()
+        }
+    }
+
     #[test]
     fn trailing_whitespace_is_removed_outside_strings() {
         let source = "val a = 1   \nval s = \"\"\"line   \n  more\"\"\"  \n";
@@ -1552,7 +1577,10 @@ mod tests {
     #[test]
     fn lines_end_in_newline() {
         let crlf = "object A {\r\n  val x = 1\r\n}\r\n";
-        assert_eq!(fmt(crlf), "object A {\n  val x = 1\n}\n");
+        assert_eq!(
+            format(crlf, &scala2()).unwrap(),
+            "object A {\n  val x = 1\n}\n"
+        );
         // Inside a string, a line ending is part of the value and stays.
         let string = "val s = \"\"\"a\r\nb\"\"\"\r\n";
         assert_eq!(fmt(string), "val s = \"\"\"a\r\nb\"\"\"\n");
@@ -1564,7 +1592,7 @@ mod tests {
             "val a = 1\n\n\n\n\nobject B {\n  object C {\n    val c = 1\n\n\n\n    val d = 2\n  }\n\n\n\n",
             "  def f = {\n    val x = 1\n\n\n\n    x\n  }\n}\n",
         );
-        let options = FormatOptions::default();
+        let options = scala2();
         let with = |templates, blocks| {
             let style = Style {
                 max_blank_lines_in_templates: templates,
@@ -1683,7 +1711,8 @@ mod tests {
     /// Rewrites every error-free file in the corpus to Scala 3's syntax and
     /// to Scala 2.13's, checking that each result is
     /// equivalent, stable when formatted again, and has none of the other
-    /// syntax left. Run with:
+    /// syntax left, unless tree-sitter-scala read a construct differently
+    /// rewritten, which leaves it as written. Run with:
     /// `cargo test --release corpus_rewrites -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
@@ -1698,7 +1727,7 @@ mod tests {
                 ..FormatOptions::default()
             };
             // For each file, whether it was rewritten, and its failures.
-            let per_file: Vec<(bool, Vec<String>)> = files
+            let per_file: Vec<(bool, usize, Vec<String>)> = files
                 .par_iter()
                 .filter_map(|path| {
                     let source = std::fs::read_to_string(path).ok()?;
@@ -1708,13 +1737,15 @@ mod tests {
                     {
                         return None;
                     }
-                    let rewritten = rewrite::rewrite(&tree, dialect).is_some();
+                    let result = rewrite::rewrite(&tree, dialect);
+                    let rewritten = result.is_some();
+                    let dropped = result.map_or(0, |r| r.dropped);
                     let mut failures = Vec::new();
                     let out = match format(&source, &options) {
                         Ok(out) => out,
                         Err(e) => {
                             failures.push(format!("{name}: {}: {e}", path.display()));
-                            return Some((rewritten, failures));
+                            return Some((rewritten, dropped, failures));
                         }
                     };
                     if format(&out, &options).as_deref() != Ok(out.as_str()) {
@@ -1744,25 +1775,60 @@ mod tests {
                                     | SyntaxKind::WhileExpression
                                     | SyntaxKind::ForExpression
                             ) && rewrite::control(&out, *n, dialect.quiet_syntax).is_some()
+                            || new
+                                && matches!(
+                                    n.kind(),
+                                    SyntaxKind::Block
+                                        | SyntaxKind::CaseBlock
+                                        | SyntaxKind::TemplateBody
+                                        | SyntaxKind::EnumBody
+                                        | SyntaxKind::ForExpression
+                                )
+                                && rewrite::braces(&tree, *n).is_some()
+                            || !new
+                                && matches!(
+                                    n.kind(),
+                                    SyntaxKind::IndentedBlock
+                                        | SyntaxKind::IndentedCases
+                                        | SyntaxKind::TemplateBody
+                                        | SyntaxKind::EnumBody
+                                )
+                                && rewrite::braces_back(&tree, *n).is_some()
                     });
-                    // Unless it's copied verbatim, as in `format: off`.
-                    if let Some(node) =
-                        other.filter(|n| tree.verbatim_at(n.text_range().start()).is_none())
-                    {
+                    // Unless it's copied verbatim, as in `format: off`, or left as
+                    // written because tree-sitter-scala reads it differently
+                    // rewritten: rewriting the output again leaves it out.
+                    let other =
+                        other.filter(|n| tree.verbatim_at(n.text_range().start()).is_none());
+                    let misread = other.is_some()
+                        && rewrite::rewrite(&tree, dialect).is_none_or(|r| r.dropped > 0);
+                    let dropped = dropped.max(usize::from(misread));
+                    if let Some(node) = other.filter(|_| !misread) {
                         let (line, col) = tree.line_col(node.text_range().start());
                         failures.push(format!(
                             "{name}: {}:{line}:{col}: other syntax left",
                             path.display()
                         ));
                     }
-                    Some((rewritten, failures))
+                    Some((rewritten, dropped, failures))
                 })
                 .collect();
-            let rewritten = per_file.iter().filter(|(rewritten, _)| *rewritten).count();
-            failures.extend(per_file.into_iter().flat_map(|(_, failures)| failures));
-            println!("{name}: {} files, {rewritten} rewritten", files.len());
+            let rewritten = per_file
+                .iter()
+                .filter(|(rewritten, _, _)| *rewritten)
+                .count();
+            let with_dropped = per_file.iter().filter(|(_, d, _)| *d > 0).count();
+            let dropped: usize = per_file.iter().map(|(_, d, _)| d).sum();
+            failures.extend(per_file.into_iter().flat_map(|(_, _, failures)| failures));
+            println!(
+                "{name}: {} files, {rewritten} rewritten, {dropped} constructs in {with_dropped} files left as written",
+                files.len()
+            );
         }
-        for failure in failures.iter().take(15) {
+        for failure in failures
+            .iter()
+            .take(std::env::var("SCUFF_SHOW").map_or(15, |n| n.parse().unwrap_or(15)))
+        {
             println!("{failure}");
         }
         println!("{} failed", failures.len());
