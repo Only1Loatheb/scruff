@@ -683,12 +683,18 @@ pub(super) fn braces(tree: &Tree, node: SyntaxNode<'_>) -> Option<Vec<(TextRange
 
 /// The edits that make a call's braced argument a colon argument, as
 /// SIP-44 allows: `xs.map { x =>` to `xs.map: x =>`, `xs.foreach {` to
-/// `xs.foreach:` and `xs.collect {` with `case` clauses to `xs.collect:`,
-/// with the `}` line gone. None unless the lambda's parameters are a name,
-/// `_` or in parentheses, `{` or the lambda's `=>` ends its line, `}` is
-/// alone on its own, every line between is deeper than the `}`, the `{`
-/// line and the call's first line, and the next line isn't deeper than the
-/// `}`.
+/// `xs.foreach:` and `xs.collect {` with `case` clauses to `xs.collect:`.
+/// Only where the lambda's parameters are a name, `_` or in parentheses,
+/// and what follows the `}` on its line is nothing, closing brackets, or a
+/// `.` and what it selects.
+///
+/// Over several lines, `{` or the lambda's `=>` ends its line, every line
+/// between is deeper than the `}`, the `{` line and the call's first line,
+/// and the `}` starts its line and goes, with its line if nothing follows
+/// it, when the next line isn't deeper. On one line, with one expression or
+/// `case` and no comments, the body goes on the next line, a step deeper
+/// than the line the call's argument lists start on, and a `.` after the
+/// `}` on a line of its own at that line's width.
 pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit>> {
     let text = tree.syntax().text();
     let argument = call.child_by_field_name("arguments")?.into_node()?;
@@ -709,7 +715,7 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
         text[start..].len() - text[start..].trim_start_matches(' ').len()
     };
     let breaks = |from: TextSize, to: TextSize| text[at(from)..at(to)].contains('\n');
-    // What ends the `{` line: the `{`, or a lambda's `=>`.
+    // What starts the body: the `{`, or a lambda's `=>`.
     let statements: Vec<_> = argument
         .non_trivia_children()
         .filter(|c| c.kind().is_named())
@@ -743,7 +749,63 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
         || !text[at(before.text_range().end())..at(open.text_range().start())]
             .chars()
             .all(|c| c == ' ')
-        || !breaks(line_end.text_range().end(), first.text_range().start())
+    {
+        return None;
+    }
+    // What follows the `}` on its line: nothing, closing brackets, or a
+    // `.` and what it selects.
+    let after = next_code(close);
+    let after_on_line = after.filter(|a| !breaks(close.text_range().end(), a.text_range().start()));
+    let selects = after_on_line.is_some_and(|a| a.text() == ".");
+    if after_on_line.is_some_and(|a| !matches!(a.text(), "." | ")" | "]"))
+        || after_on_line
+            .is_some_and(|a| !text[at(close.text_range().end())..at(a.text_range().start())]
+                .trim()
+                .is_empty())
+    {
+        return None;
+    }
+    let colon = (
+        TextRange::new(before.text_range().end(), open.text_range().end()),
+        ":".to_string(),
+    );
+    if !breaks(open.text_range().start(), close.text_range().end()) {
+        // On one line: one expression or `case`, and no comments.
+        let tokens: Vec<_> = argument.tokens().filter(|t| t.owns_trivia()).collect();
+        let single = match argument.kind() {
+            SyntaxKind::CaseBlock => statements.len() == 1,
+            _ => tokens.iter().all(|t| t.text() != ";"),
+        };
+        let commented = tokens.iter().any(|t| {
+            t.leading_trivia()
+                .chain(t.trailing_trivia())
+                .any(|c| c.is_comment())
+                && *t != close
+        });
+        if !single || commented || close.leading_trivia().any(|c| c.is_comment()) {
+            return None;
+        }
+        let width = lists_start_width(text, open)?;
+        let mut edits = vec![
+            colon,
+            (
+                TextRange::new(line_end.text_range().end(), first.text_range().start()),
+                format!("\n{}", " ".repeat(width + 2)),
+            ),
+        ];
+        match after_on_line {
+            Some(dot) if selects => edits.push((
+                TextRange::new(last.text_range().end(), dot.text_range().start()),
+                format!("\n{}", " ".repeat(width)),
+            )),
+            _ => edits.push((
+                TextRange::new(last.text_range().end(), close.text_range().end()),
+                String::new(),
+            )),
+        }
+        return Some(edits);
+    }
+    if !breaks(line_end.text_range().end(), first.text_range().start())
         || !breaks(last.text_range().end(), close.text_range().start())
         || !text[line_start(close.text_range().start())..at(close.text_range().start())]
             .trim()
@@ -780,62 +842,84 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
             }
         }
     }
-    // Nothing after the `}` on its line, and no deeper line next.
-    let eol = text[at(close.text_range().end())..]
-        .find('\n')
-        .map_or(text.len(), |i| at(close.text_range().end()) + i);
-    let after = next_code(close);
-    if !text[at(close.text_range().end())..eol].trim().is_empty()
-        || after
-            .is_some_and(|a| indent(a.text_range().start()) > indent(close.text_range().start()))
-    {
-        return None;
-    }
-    let line_break = text[..at(close.text_range().start())].rfind('\n')?;
-    Some(vec![
-        (
-            TextRange::new(before.text_range().end(), open.text_range().end()),
-            ":".to_string(),
-        ),
-        (
+    let close_edit = match after_on_line {
+        // `}.filter(p)` to `.filter(p)`, and `})` to `)`.
+        Some(after) => TextRange::new(close.text_range().start(), after.text_range().start()),
+        // The `}` line goes, if no deeper line follows.
+        None => {
+            let eol = text[at(close.text_range().end())..]
+                .find('\n')
+                .map_or(text.len(), |i| at(close.text_range().end()) + i);
+            if !text[at(close.text_range().end())..eol].trim().is_empty()
+                || after.is_some_and(|a| {
+                    indent(a.text_range().start()) > indent(close.text_range().start())
+                })
+            {
+                return None;
+            }
+            let line_break = text[..at(close.text_range().start())].rfind('\n')?;
             TextRange::new(
                 TextSize::try_from(line_break).ok()?,
                 close.text_range().end(),
-            ),
-            String::new(),
-        ),
-    ])
+            )
+        }
+    };
+    Some(vec![colon, (close_edit, String::new())])
+}
+
+/// The width of the line a call's argument lists start on, from a token
+/// after them: back over each `(...)` and `[...]` before it, so `fn(` for
+/// `): x =>` on a later line.
+fn lists_start_width(text: &str, token: SyntaxToken<'_>) -> Option<usize> {
+    let mut anchor = token;
+    while let Some(previous) = previous_code(anchor).filter(|t| matches!(t.text(), ")" | "]")) {
+        anchor = previous.parent()?.tokens().find(|t| t.owns_trivia())?;
+    }
+    let start = text[..usize::from(anchor.text_range().start())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    Some(text[start..].len() - text[start..].trim_start_matches(' ').len())
 }
 
 /// The edits that make a colon argument a braced one, for a dialect
 /// without SIP-44: `xs.map: x =>` to `xs.map { x =>`, with a `}` on a line
 /// of its own after the body, at the width of the line the call's argument
-/// lists start on, as `fn(` when they end on a later line: `): x =>`. None
-/// if it ends in an end marker.
+/// lists start on, as `fn(` when they end on a later line: `): x =>`. A
+/// `.` or closing bracket starting the next line goes after the `}`, as
+/// in `}.filter(p)`, and a closing bracket after the body on its line goes
+/// after the `}` too. None if it ends in an end marker.
 pub(super) fn fewer_braces_back(tree: &Tree, argument: SyntaxNode<'_>) -> Option<Vec<Edit>> {
     let text = tree.syntax().text();
     let colon = previous_code(argument.tokens().find(|t| t.owns_trivia())?)?;
     let last = argument.last_code_token()?;
-    if colon.text() != ":" || next_code(last).is_some_and(|t| t.text() == "end") {
+    let after = next_code(last);
+    if colon.text() != ":" || after.is_some_and(|t| t.text() == "end") {
         return None;
     }
+    let width = lists_start_width(text, colon)?;
     let at = |offset: TextSize| usize::from(offset);
-    // Back over argument lists to the line they start on.
-    let mut anchor = colon;
-    while let Some(previous) = previous_code(anchor).filter(|t| matches!(t.text(), ")" | "]")) {
-        anchor = previous.parent()?.tokens().find(|t| t.owns_trivia())?;
-    }
-    let start = text[..at(anchor.text_range().start())]
-        .rfind('\n')
-        .map_or(0, |i| i + 1);
-    let width = text[start..].len() - text[start..].trim_start_matches(' ').len();
-    let end = at(last.text_range().end());
-    let eol = text[end..].find('\n').map_or(text.len(), |i| end + i);
-    let eol = TextSize::try_from(eol).ok()?;
-    Some(vec![
-        (colon.text_range(), " {".to_string()),
-        (TextRange::empty(eol), format!("\n{}}}", " ".repeat(width))),
-    ])
+    let close = match after {
+        Some(after) if matches!(after.text(), "." | ")" | "]") => {
+            let start = after.text_range().start();
+            let starts_line = text[..at(start)].trim_end_matches(' ').ends_with('\n');
+            if starts_line {
+                // `}.filter(p)` and `})`.
+                (TextRange::empty(start), "}".to_string())
+            } else {
+                (
+                    TextRange::empty(start),
+                    format!("\n{}}}", " ".repeat(width)),
+                )
+            }
+        }
+        _ => {
+            let end = at(last.text_range().end());
+            let eol = text[end..].find('\n').map_or(text.len(), |i| end + i);
+            let eol = TextSize::try_from(eol).ok()?;
+            (TextRange::empty(eol), format!("\n{}}}", " ".repeat(width)))
+        }
+    };
+    Some(vec![(colon.text_range(), " {".to_string()), close])
 }
 
 /// Whether every line starting in `start..end` is indented deeper than
@@ -1512,16 +1596,47 @@ mod tests {
                 "val y = xs\n  .map { x =>\n    a\n  }\n",
                 "val y = xs\n  .map: x =>\n    a\n",
             ),
+            // A selection or closing bracket after the `}`.
+            (
+                "xs.map { x =>\n  a\n}.filter(p)\n",
+                "xs.map: x =>\n  a\n.filter(p)\n",
+            ),
+            ("f(xs.map { x =>\n  a\n})\n", "f(xs.map: x =>\n  a\n)\n"),
         ] {
             assert_eq!(rewritten(braced, fewer), colon, "{braced}");
             assert_eq!(rewritten(colon, OLD), braced, "{colon}");
         }
+        // On one line, the body goes on the next.
+        for (braced, colon) in [
+            ("val a = xs.map { x => a }\n", "val a = xs.map: x =>\n  a\n"),
+            ("xs.foreach { println(_) }\n", "xs.foreach:\n  println(_)\n"),
+            (
+                "xs.collect { case Some(x) => x }\n",
+                "xs.collect:\n  case Some(x) => x\n",
+            ),
+            ("f(xs.map { x => a })\n", "f(xs.map: x =>\n  a)\n"),
+            (
+                "val b = xs.map { x => a }.filter(p)\n",
+                "val b = xs.map: x =>\n  a\n.filter(p)\n",
+            ),
+            (
+                "  foo(a)(b) { x => c }\n",
+                "  foo(a)(b): x =>\n    c\n",
+            ),
+        ] {
+            assert_eq!(rewritten(braced, fewer), colon, "{braced}");
+        }
+        assert_eq!(
+            rewritten("f(xs.map: x =>\n  a)\n", OLD),
+            "f(xs.map { x =>\n  a\n})\n"
+        );
         for same in [
-            // On one line.
-            "xs.map { x => a }\n",
-            // Something after the `}`.
-            "xs.map { x =>\n  a\n}.filter(p)\n",
-            "f(xs.map { x =>\n  a\n})\n",
+            // Anything else after the `}`.
+            "xs.map { x =>\n  a\n} + 1\n",
+            "xs.map { x => a } + 1\n",
+            // On one line, more than one expression, or a comment.
+            "xs.foreach { a; b }\n",
+            "xs.map { x => /* c */ a }\n",
             // The body starting on the `=>` line.
             "xs.map { x => a\n  b\n}\n",
             // A typed parameter without parentheses.

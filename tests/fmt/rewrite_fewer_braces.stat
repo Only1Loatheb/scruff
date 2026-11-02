@@ -45,7 +45,7 @@ val a = xs
 foo(a): x =>
   x
 
-<<< braces stay on one line, before more code, or inside parentheses
+<<< on one line, before a selection, or inside parentheses
 val a = xs.map { x => x + 1 }
 val b = xs.map { x =>
   x + 1
@@ -54,13 +54,25 @@ f(xs.map { x =>
   x + 1
 })
 >>>
-val a = xs.map { x => x + 1 }
+val a = xs.map: x =>
+  x + 1
+val b = xs.map: x =>
+  x + 1
+.filter(p)
+f(xs.map: x =>
+  x + 1
+)
+
+<<< braces stay before other code
+val a = xs.map { x => x + 1 } ++ ys
 val b = xs.map { x =>
   x + 1
-}.filter(p)
-f(xs.map { x =>
+} ++ ys
+>>>
+val a = xs.map { x => x + 1 } ++ ys
+val b = xs.map { x =>
   x + 1
-})
+} ++ ys
 
 <<< Scala 2 gets braces back
 dialect = scala213
@@ -83,3 +95,20 @@ fn2(
 ) { env =>
   println(env)
 }
+
+<<< Scala 2 gets braces back before a selection or a closing parenthesis
+dialect = scala213
+===
+val b = xs.map: x =>
+  x + 1
+.filter(p)
+f(xs.map: x =>
+  x + 1
+)
+>>>
+val b = xs.map { x =>
+  x + 1
+}.filter(p)
+f(xs.map { x =>
+  x + 1
+})
