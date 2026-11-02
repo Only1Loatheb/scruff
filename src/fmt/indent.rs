@@ -1,9 +1,12 @@
-//! Re-indentation by uniform shifts.
+//! Re-indentation by uniform shifts, decided from the source and laid out
+//! by the printer.
 //!
 //! A container is a place whose statements sit on their own lines: a block
 //! in braces, a Scala 3 indentation region, or the whole file. Its
-//! statements belong 2 spaces deeper than the line that opens it (the line
-//! with the `{`, or the line before a region), or at column 0 for the file.
+//! statements belong 2 spaces deeper than the line that opens it, or at
+//! column 0 for the file. That line is where what it belongs to starts: a
+//! definition, or an `if`, a lambda or a call that starts on the line of
+//! the `{` or the region's opener; otherwise the opener's own line.
 //! Every line inside a container moves by the same amount, so a statement
 //! keeps the shape of its continuation lines, and a nested container is then
 //! placed from its opener's new position.
@@ -12,6 +15,11 @@
 //! indentation moves with the container around it instead. Files with tabs
 //! in their indentation, or with code that is copied verbatim for its
 //! indentation (`format: off`, syntax errors, unsafe regions), keep theirs.
+//!
+//! The result is a [`Layout`]: which nodes start a frame on their opener's
+//! line, which containers nest their statements, and each line's offset
+//! from where its frame puts lines. The printer turns those into columns,
+//! so a container follows its opener wherever the opener ends up.
 
 use std::collections::HashMap;
 
@@ -25,29 +33,100 @@ use crate::lossless_tree::{
 /// opener's line.
 const STEP: usize = 2;
 
-/// New indentation for lines, keyed by the offset of the line's first
-/// non-blank character. Lines that keep their indentation aren't listed.
+/// Where lines go, for the formatter to build into its document. The
+/// default keeps every line's indentation as written.
 #[derive(Default, Debug)]
-pub(super) struct Reindent {
+pub(super) struct Layout {
+    /// Each line's indentation past where its frame puts lines, keyed by
+    /// its first non-blank character.
+    offsets: HashMap<TextSize, isize>,
+    /// Nodes that start a frame: lines inside them are placed from the
+    /// line the frame starts on.
+    frames: HashMap<(SyntaxKind, TextRange), Vec<Frame>>,
+    /// Containers whose statements are placed from their frame.
+    containers: HashMap<(SyntaxKind, TextRange), Nested>,
+    /// The new width of each line that moves, as the source reads, for
+    /// tests of which containers are placed.
+    #[cfg_attr(not(test), allow(dead_code))]
     widths: HashMap<TextSize, usize>,
 }
 
-impl Reindent {
+/// Where a frame starts in its node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Frame {
+    /// After the node's leading line break and indentation, on the line of
+    /// its first token.
+    AfterLeading,
+    /// From this child token to the end of the region it opens, or of the
+    /// node: a region's opener, or a match type's `{`.
+    At(TextSize, TextSize),
+}
+
+/// A container placed from its frame.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Nested {
+    /// Where its statements are, so what's nested.
+    pub(super) inner: TextRange,
+    /// Whether its statements go one level deeper than its frame's line;
+    /// `case` clauses may stay at its width.
+    pub(super) deeper: bool,
+}
+
+impl Layout {
     /// `relaid` lists the `(` and `)` of lists whose line breaks the
     /// formatter decides: what follows the `)` ends up on a line indented
     /// as the `(`'s line, whether the list is joined or broken.
-    pub(super) fn new(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Reindent {
+    pub(super) fn new(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Layout {
         compute(tree, relaid).unwrap_or_default()
     }
 
-    /// The new indentation of the line whose first non-blank character is
-    /// at `offset`, if it changes.
-    pub(super) fn width(&self, offset: TextSize) -> Option<usize> {
-        self.widths.get(&offset).copied()
+    /// The line's indentation past where its frame puts lines, for the line
+    /// whose first non-blank character is at `first`. `None` if the line
+    /// keeps its indentation as written.
+    pub(super) fn offset(&self, first: TextSize) -> Option<isize> {
+        self.offsets.get(&first).copied()
     }
 
+    /// Whether the node starts a frame after its leading trivia.
+    pub(super) fn frames_after_leading(&self, node: SyntaxNode<'_>) -> bool {
+        self.frames(node).contains(&Frame::AfterLeading)
+    }
+
+    /// Where the node's frames from child tokens start and end, in order.
+    pub(super) fn frames_at(&self, node: SyntaxNode<'_>) -> Vec<(TextSize, TextSize)> {
+        let mut at: Vec<_> = self
+            .frames(node)
+            .iter()
+            .filter_map(|f| match f {
+                Frame::At(token, end) => Some((*token, *end)),
+                Frame::AfterLeading => None,
+            })
+            .collect();
+        at.sort();
+        at
+    }
+
+    fn frames(&self, node: SyntaxNode<'_>) -> &[Frame] {
+        self.frames
+            .get(&(node.kind(), node.text_range()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// How the node nests its statements, if it's a placed container.
+    pub(super) fn container(&self, node: SyntaxNode<'_>) -> Option<Nested> {
+        self.containers
+            .get(&(node.kind(), node.text_range()))
+            .copied()
+    }
+
+    /// Whether every line keeps its indentation as written.
     pub(super) fn is_empty(&self) -> bool {
-        self.widths.is_empty()
+        self.offsets.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn width(&self, offset: TextSize) -> Option<usize> {
+        self.widths.get(&offset).copied()
     }
 
     #[cfg(test)]
@@ -57,6 +136,10 @@ impl Reindent {
 }
 
 struct Container<'t> {
+    /// The node that holds the statements.
+    node: SyntaxNode<'t>,
+    /// The node that starts its frame, and where.
+    frame: Option<(SyntaxNode<'t>, Frame)>,
     /// Where its statements can be: between the braces, or the region.
     inner: TextRange,
     statements: Vec<SyntaxElement<'t>>,
@@ -77,7 +160,7 @@ struct Line {
     comment: bool,
 }
 
-fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
+fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
     let text = tree.syntax().text();
     let copied_for_layout = tree.verbatim_ranges().iter().any(|v| {
         matches!(
@@ -135,6 +218,8 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
     };
 
     let mut containers = vec![Container {
+        node: tree.syntax(),
+        frame: None,
         inner: tree.syntax().text_range(),
         statements: tree.syntax().non_trivia_children().collect(),
         opener: None,
@@ -172,6 +257,9 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
     // For a container placed on its own: its statements' old and new
     // indentation.
     let mut placed: Vec<Option<(usize, usize)>> = vec![None; containers.len()];
+    // For a placed container: whether its statements go a step deeper than
+    // its opener's line.
+    let mut deeper = vec![false; containers.len()];
     for (index, container) in containers.iter().enumerate() {
         let inherited = if index == 0 { 0 } else { shift[parent[index]] };
         shift[index] = inherited;
@@ -201,6 +289,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
                     STEP
                 };
                 floor = lines[line].width + step;
+                deeper[index] = step > 0;
                 width as usize + step
             }
         };
@@ -242,7 +331,117 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
             widths.insert(line.first, width);
         }
     }
-    Some(Reindent { widths })
+
+    // Where each line is placed from: the innermost frame or placed
+    // container around it. A frame places lines from its opener's line, a
+    // container from its statements' indentation.
+    struct Span {
+        range: TextRange,
+        /// The source width lines are placed from.
+        from: usize,
+        /// The container, for a container's statements.
+        container: Option<usize>,
+    }
+    let mut spans = vec![Span {
+        range: tree.syntax().text_range(),
+        from: placed[0].map_or(0, |(indent, _)| indent),
+        container: Some(0),
+    }];
+    let mut frames = HashMap::new();
+    let mut nested = HashMap::new();
+    for (index, container) in containers.iter().enumerate().skip(1) {
+        // A container that isn't placed moves with the one around it.
+        let Some((indent, _)) = placed[index] else {
+            continue;
+        };
+        // Placed from its own first statement, as `case` clauses after
+        // `xs.map:` are, it stays where it is: no frame.
+        let Some((node, frame)) = container.frame else {
+            continue;
+        };
+        let node_frames: &mut Vec<Frame> =
+            frames.entry((node.kind(), node.text_range())).or_default();
+        if !node_frames.contains(&frame) {
+            node_frames.push(frame);
+        }
+        // The frame starts after the line break before its first token, so
+        // that token's line is placed from outside it, and ends at its last
+        // token: a node's range can take in the comments and blank lines
+        // after it.
+        let (first, end) = match frame {
+            Frame::AfterLeading => (
+                node.text_range().start(),
+                node.tokens()
+                    .filter(SyntaxToken::owns_trivia)
+                    .last()
+                    .map_or(node.text_range().end(), |t| t.text_range().end()),
+            ),
+            Frame::At(token, end) => (token, end),
+        };
+        let start = first + TextSize::from(1);
+        if let Some(line) = line_of(first)
+            && start < end
+        {
+            spans.push(Span {
+                range: TextRange::new(start, end),
+                from: lines[opener_line(line)].width,
+                container: None,
+            });
+        }
+        // Its statements, from their indentation.
+        let node = container.node;
+        nested.insert(
+            (node.kind(), node.text_range()),
+            Nested {
+                inner: container.inner,
+                deeper: deeper[index],
+            },
+        );
+        spans.push(Span {
+            range: container.inner,
+            from: indent,
+            container: Some(index),
+        });
+    }
+    // Outer spans first; a container's statements inside its frame.
+    spans.sort_by_key(|s| {
+        (
+            s.range.start(),
+            std::cmp::Reverse(s.range.end()),
+            s.container.is_some(),
+        )
+    });
+    let mut offsets = HashMap::new();
+    let mut open: Vec<&Span> = Vec::new();
+    let mut next = 0;
+    for (line, &o) in lines.iter().zip(&owner) {
+        while let Some(span) = spans.get(next).filter(|s| s.range.start() <= line.first) {
+            while open
+                .last()
+                .is_some_and(|top| top.range.end() <= span.range.start())
+            {
+                open.pop();
+            }
+            open.push(span);
+            next += 1;
+        }
+        while open.last().is_some_and(|top| top.range.end() <= line.first) {
+            open.pop();
+        }
+        let span = open.last()?;
+        let offset = match span.container {
+            // The same comment rule as above.
+            Some(c) if c == o && line.comment && line.width < span.from && shift[o] != 0 => 0,
+            _ => line.width as isize - span.from as isize,
+        };
+        offsets.insert(line.first, offset);
+    }
+    Some(Layout {
+        offsets,
+        frames,
+        containers: nested,
+        widths,
+    })
 }
 
 /// The container a node makes, if any.
@@ -267,10 +466,27 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
         // From after the opener, which an `extension`'s range includes, to
         // its last token: the node can end at the next line's first token.
         let last = node.tokens().filter(SyntaxToken::owns_trivia).last()?;
+        let (frame, start) = match definition_start(node) {
+            Some(start) => ((node.parent()?, Frame::AfterLeading), start),
+            // An extension's range takes in its opener.
+            None if node.text_range().start() <= opener.text_range().start() => {
+                ((node, Frame::AfterLeading), opener)
+            }
+            None => (
+                owner_frame(node, opener).unwrap_or((
+                    opener.parent()?,
+                    Frame::At(opener.text_range().start(), last.text_range().end()),
+                )),
+                opener,
+            ),
+        };
+        let inner = TextRange::new(opener.text_range().end(), last.text_range().end());
         return Some(Container {
-            inner: TextRange::new(opener.text_range().end(), last.text_range().end()),
+            node,
+            frame: (start.text_range().start() < inner.start()).then_some(frame),
+            inner,
             statements,
-            opener: Some(definition_start(node).unwrap_or(opener)),
+            opener: Some(start),
             cases: node.kind() == SyntaxKind::IndentedCases,
         });
     }
@@ -293,12 +509,50 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
         .filter(|c| c.kind().is_named())
         .copied()
         .collect();
+    let (frame, start) = match definition_start(node) {
+        Some(start) => ((node.parent()?, Frame::AfterLeading), start),
+        None => {
+            let own = if node.first_token() == Some(*open) {
+                (node, Frame::AfterLeading)
+            } else {
+                (
+                    node,
+                    Frame::At(open.text_range().start(), close.text_range().end()),
+                )
+            };
+            (owner_frame(node, *open).unwrap_or(own), *open)
+        }
+    };
     Some(Container {
+        node,
+        frame: Some(frame),
         inner: TextRange::new(open.text_range().end(), close.text_range().start()),
         statements,
-        opener: Some(definition_start(node).unwrap_or(*open)),
+        opener: Some(start),
         cases: false,
     })
+}
+
+/// For a region or a block in braces that isn't a definition's body, a
+/// frame from the start of what it belongs to, such as an `if`, a lambda
+/// or a call, if that's on the opener's line: a rule that breaks the line
+/// before the opener, as in a long condition, doesn't move the body. `None`
+/// if it starts on an earlier line, as for an `else` on a line of its own,
+/// so the frame starts at the opener.
+fn owner_frame<'t>(
+    node: SyntaxNode<'t>,
+    opener: SyntaxToken<'t>,
+) -> Option<(SyntaxNode<'t>, Frame)> {
+    let owner = std::iter::successors(node.parent(), SyntaxNode::parent).find(|n| {
+        n.tokens()
+            .find(SyntaxToken::owns_trivia)
+            .is_some_and(|t| t.text_range().start() < opener.text_range().start())
+    })?;
+    let start = owner.tokens().find(SyntaxToken::owns_trivia)?;
+    let base = owner.text_range().start();
+    let between = &owner.text()[usize::from(start.text_range().start() - base)
+        ..usize::from(opener.text_range().start() - base)];
+    (!between.contains('\n')).then_some((owner, Frame::AfterLeading))
 }
 
 /// For the body of a definition, a class body or `case` clauses, the first
@@ -358,7 +612,7 @@ mod tests {
     /// The source with each line moved to its new indentation.
     fn reindented(source: &str) -> String {
         let tree = parse(source);
-        let reindent = Reindent::new(&tree, &[]);
+        let reindent = Layout::new(&tree, &[]);
         let mut out = String::new();
         let mut start = 0;
         for line in source.split_inclusive('\n') {
@@ -403,7 +657,7 @@ mod tests {
     #[test]
     fn already_formatted_code_stays() {
         let source = "object A {\n  def f = {\n    g(\n      a\n    )\n  }\n}\n";
-        assert_eq!(Reindent::new(&parse(source), &[]).len(), 0);
+        assert_eq!(Layout::new(&parse(source), &[]).len(), 0);
     }
 
     #[test]
@@ -417,7 +671,7 @@ mod tests {
     #[test]
     fn an_end_marker_read_as_a_statement_stays() {
         let source = "trait A:\n//\nend A\n";
-        assert_eq!(Reindent::new(&parse(source), &[]).len(), 0);
+        assert_eq!(Layout::new(&parse(source), &[]).len(), 0);
     }
 
     #[test]

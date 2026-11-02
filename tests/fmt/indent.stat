@@ -147,3 +147,40 @@ object A {
       |text
       |""".stripMargin
 }
+
+<<< a body stays indented from its `if` when a rule breaks the condition
+def f =
+  if alpha && beta && gamma && delta && epsilon && zeta && eta && theta && iota && kappa && lambda then
+    one
+  else
+    two
+>>>
+def f =
+  if alpha &&
+    beta &&
+    gamma &&
+    delta &&
+    epsilon &&
+    zeta &&
+    eta &&
+    theta &&
+    iota &&
+    kappa &&
+    lambda then
+    one
+  else
+    two
+
+<<< a block follows its `{` to the line a joined list ends on
+def f =
+  run(
+    alpha,
+    beta
+  ).map { x =>
+        x + 1
+  }
+>>>
+def f =
+  run(alpha, beta).map { x =>
+    x + 1
+  }

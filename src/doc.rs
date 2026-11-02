@@ -33,10 +33,21 @@ pub enum Doc<'a> {
     /// after the first are not indented. A line break forces the enclosing
     /// groups to break.
     Verbatim(Cow<'a, str>),
+    /// Text printed as given, except that its lines after the first move
+    /// with the first: it was written at `column`, and if it's printed
+    /// elsewhere, each later line moves by as much. For a multi-line
+    /// comment, whose ` *` lines should stay under its `/**`.
+    Relative {
+        text: Cow<'a, str>,
+        column: usize,
+    },
     Line(LineKind),
     Concat(Vec<Doc<'a>>),
     /// Indents the lines that start inside it by one level.
     Nest(Box<Doc<'a>>),
+    /// Indents the lines that start inside it by this many more columns, or
+    /// fewer if negative, but never past the start of the line.
+    Offset(isize, Box<Doc<'a>>),
     /// Indents the lines that start inside it from the indentation of the
     /// line it starts on, instead of from the enclosing nesting. For laying
     /// out part of a line whose indentation came from elsewhere, such as
@@ -145,6 +156,13 @@ impl<'a> Doc<'a> {
         Doc::Nest(Box::new(self))
     }
 
+    pub fn offset(self, columns: isize) -> Doc<'a> {
+        match columns {
+            0 => self,
+            _ => Doc::Offset(columns, Box::new(self)),
+        }
+    }
+
     pub fn from_line_indent(self) -> Doc<'a> {
         Doc::FromLineIndent(Box::new(self))
     }
@@ -179,7 +197,7 @@ impl<'a> Doc<'a> {
                     *width += self::width(text);
                     false
                 }
-                Doc::Verbatim(text) => match text.find(['\n', '\r']) {
+                Doc::Verbatim(text) | Doc::Relative { text, .. } => match text.find(['\n', '\r']) {
                     Some(i) => {
                         *width += self::width(&text[..i]);
                         true
@@ -191,9 +209,10 @@ impl<'a> Doc<'a> {
                 },
                 Doc::Line(_) => true,
                 Doc::Concat(parts) => parts.iter().any(|part| walk(part, width)),
-                Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
-                    walk(inner, width)
-                }
+                Doc::Nest(inner)
+                | Doc::Offset(_, inner)
+                | Doc::FromLineIndent(inner)
+                | Doc::Group(inner) => walk(inner, width),
                 Doc::IfBreak { flat, .. } => walk(flat, width),
                 Doc::Align(parts) => parts
                     .iter()
@@ -223,8 +242,8 @@ impl<'a> Doc<'a> {
             Doc::LineSuffix(inner) if suffixes => inner.flat_width_counting(true),
             Doc::Nil | Doc::LineSuffix(_) => Some(0),
             Doc::Text(text) => Some(width(text)),
-            Doc::Verbatim(text) if text.contains(['\n', '\r']) => None,
-            Doc::Verbatim(text) => Some(width(text)),
+            Doc::Verbatim(text) | Doc::Relative { text, .. } if text.contains(['\n', '\r']) => None,
+            Doc::Verbatim(text) | Doc::Relative { text, .. } => Some(width(text)),
             Doc::Line(LineKind::Line) => Some(1),
             Doc::Line(LineKind::Soft) => Some(0),
             Doc::Line(LineKind::Hard) | Doc::BreakParent => None,
@@ -232,9 +251,10 @@ impl<'a> Doc<'a> {
                 .iter()
                 .map(|part| part.flat_width_counting(suffixes))
                 .sum(),
-            Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
-                inner.flat_width_counting(suffixes)
-            }
+            Doc::Nest(inner)
+            | Doc::Offset(_, inner)
+            | Doc::FromLineIndent(inner)
+            | Doc::Group(inner) => inner.flat_width_counting(suffixes),
             Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
             Doc::Align(parts) => parts
                 .iter()
@@ -314,6 +334,8 @@ struct Command<'d, 'a> {
     /// Index into the base indentations, which come before `indent` levels.
     base: usize,
     indent: usize,
+    /// Columns more, or fewer, than `indent` levels.
+    offset: isize,
     mode: Mode,
     doc: Item<'d, 'a>,
 }
@@ -341,6 +363,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
     let mut commands = vec![Command {
         base: 0,
         indent: 0,
+        offset: 0,
         mode: Mode::Break,
         doc: Item::Doc(doc),
     }];
@@ -352,9 +375,13 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
         let Command {
             base,
             indent,
+            offset,
             mode,
             doc,
         } = command;
+        // The width of a new line's indentation here.
+        let line_indent = (width(&bases[base]) as isize + (indent * indent_width) as isize + offset)
+            .max(0) as usize;
         let doc = match doc {
             Item::Padding(spaces) => {
                 out.push_str(&" ".repeat(spaces));
@@ -367,6 +394,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
         let part = |doc| Command {
             base,
             indent,
+            offset,
             mode,
             doc: Item::Doc(doc),
         };
@@ -384,7 +412,32 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     None => column + width(text),
                 };
             }
+            Doc::Relative { text, column: from } => {
+                let shift = column as isize - *from as isize;
+                let mut moved = String::with_capacity(text.len());
+                for (i, line) in text.split_inclusive('\n').enumerate() {
+                    if i == 0 || line.trim().is_empty() || shift == 0 {
+                        moved.push_str(line);
+                    } else if shift > 0 {
+                        moved.push_str(&" ".repeat(shift as usize));
+                        moved.push_str(line);
+                    } else {
+                        let spaces = line.len() - line.trim_start_matches(' ').len();
+                        moved.push_str(&line[spaces.min(shift.unsigned_abs())..]);
+                    }
+                }
+                out.push_str(&moved);
+                verbatim_end = out.len();
+                column = match moved.rfind(['\n', '\r']) {
+                    Some(i) => width(&moved[i + 1..]),
+                    None => column + width(&moved),
+                };
+            }
             Doc::Concat(parts) => commands.extend(parts.iter().rev().map(part)),
+            Doc::Offset(columns, inner) => commands.push(Command {
+                offset: offset + columns,
+                ..part(inner)
+            }),
             Doc::Nest(inner) => commands.push(Command {
                 indent: indent + 1,
                 ..part(inner)
@@ -396,6 +449,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 commands.push(Command {
                     base: bases.len() - 1,
                     indent: 0,
+                    offset: 0,
                     ..part(inner)
                 });
             }
@@ -420,7 +474,6 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
             }
             Doc::LineSuffix(inner) => suffixes.push(part(inner)),
             Doc::Align(parts) => {
-                let line_indent = width(&bases[base]) + indent * indent_width;
                 let padding = align(parts, line_indent, indent_width, options.max_width);
                 for (align_part, pad) in parts.iter().zip(padding).rev() {
                     match align_part {
@@ -455,11 +508,15 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     let trimmed = out.trim_end_matches([' ', '\t']).len();
                     out.truncate(trimmed.max(verbatim_end));
                     out.push_str(&options.line_ending);
-                    out.push_str(&bases[base]);
-                    for _ in 0..indent {
-                        out.push_str(&options.indent);
+                    if offset == 0 {
+                        out.push_str(&bases[base]);
+                        for _ in 0..indent {
+                            out.push_str(&options.indent);
+                        }
+                    } else {
+                        out.push_str(&" ".repeat(line_indent));
                     }
-                    column = width(&bases[base]) + indent * indent_width;
+                    column = line_indent;
                 }
             },
         }
@@ -582,7 +639,7 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
                     *c += width(text);
                 }
             }
-            Doc::Verbatim(text) => match text.rfind(['\n', '\r']) {
+            Doc::Verbatim(text) | Doc::Relative { text, .. } => match text.rfind(['\n', '\r']) {
                 Some(i) => *column = Some(width(&text[i + 1..])),
                 None => {
                     if let Some(c) = column {
@@ -597,6 +654,10 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
                 }
             }
             Doc::Nest(inner) => walk(inner, line_indent + indent_width, indent_width, column),
+            Doc::Offset(columns, inner) => {
+                let line_indent = (line_indent as isize + columns).max(0) as usize;
+                walk(inner, line_indent, indent_width, column);
+            }
             Doc::FromLineIndent(inner) | Doc::Group(inner) => {
                 walk(inner, line_indent, indent_width, column);
             }
@@ -639,7 +700,7 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
         match doc {
             Doc::Nil | Doc::LineSuffix(_) => {}
             Doc::Text(text) => room -= width(text) as isize,
-            Doc::Verbatim(text) => match text.find(['\n', '\r']) {
+            Doc::Verbatim(text) | Doc::Relative { text, .. } => match text.find(['\n', '\r']) {
                 Some(_) if mode == Mode::Flat => return false,
                 Some(i) => return room >= width(&text[..i]) as isize,
                 None => room -= width(text) as isize,
@@ -652,7 +713,10 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             Doc::Concat(parts) => {
                 stack.extend(parts.iter().rev().map(|doc| (mode, Item::Doc(doc))));
             }
-            Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+            Doc::Nest(inner)
+            | Doc::Offset(_, inner)
+            | Doc::FromLineIndent(inner)
+            | Doc::Group(inner) => {
                 stack.push((mode, Item::Doc(inner)));
             }
             Doc::IfBreak { broken, flat } => {
@@ -810,6 +874,30 @@ mod tests {
         assert_eq!(
             at(80, &doc),
             "{\n  case 1  => one\n  case 22 =>\n    two\n  case 333 => three\n}"
+        );
+    }
+
+    #[test]
+    fn offset_moves_the_lines_that_start_inside_it() {
+        let doc = t("a")
+            + (Doc::hardline() + t("b")).offset(3)
+            + (Doc::hardline() + t("c")).nest()
+            + (Doc::hardline() + t("d")).nest().offset(-1);
+        assert_eq!(at(80, &doc), "a\n   b\n  c\n d");
+        // Never past the start of the line.
+        assert_eq!(at(80, &(Doc::hardline() + t("e")).offset(-4)), "\ne");
+    }
+
+    #[test]
+    fn relative_text_moves_its_later_lines_with_its_first() {
+        let comment = || Doc::Relative {
+            text: "/** a\n    * b\n    */".into(),
+            column: 4,
+        };
+        assert_eq!(at(80, &(t("  ") + comment())), "  /** a\n  * b\n  */");
+        assert_eq!(
+            at(80, &(t("      ") + comment())),
+            "      /** a\n      * b\n      */"
         );
     }
 

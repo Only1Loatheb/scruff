@@ -107,16 +107,16 @@ fn format_with(
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let reindent = indent::Reindent::new(&tree, &relaid_lists(&tree, rules, style));
-    let reindented = !reindent.is_empty();
-    let formatted = print(&build_doc(&tree, rules, style, reindent), &print_options);
+    let layout = indent::Layout::new(&tree, &relaid_lists(&tree, rules, style));
+    let reindented = !layout.is_empty();
+    let formatted = print(&build_doc(&tree, rules, style, layout), &print_options);
     match check_equivalent(source, &formatted) {
         Ok(()) => Ok(formatted),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&tree, rules, style, indent::Reindent::default());
+            let doc = build_doc(&tree, rules, style, indent::Layout::default());
             let formatted = print(&doc, &print_options);
             check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
             Ok(formatted)
@@ -132,18 +132,18 @@ pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
         tree,
         Rules::Structural,
         STYLE,
-        indent::Reindent::new(tree, &relaid),
+        indent::Layout::new(tree, &relaid),
     )
 }
 
 /// Where the lists are, as `(` and `)` offsets, that the list rule lays
-/// out itself, for [`indent::Reindent`]: what follows the `)` goes on the
+/// out itself, for [`indent::Layout`]: what follows the `)` goes on the
 /// line of the `(`, whether the list is joined or broken.
 fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextSize)> {
     if rules != Rules::Structural {
         return Vec::new();
     }
-    let formatter = Formatter::new(tree, rules, style, indent::Reindent::default());
+    let formatter = Formatter::new(tree, rules, style, indent::Layout::default());
     tree.syntax()
         .descendants()
         .filter_map(|node| formatter.list_parts(node))
@@ -156,13 +156,8 @@ fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextS
         .collect()
 }
 
-fn build_doc<'t>(
-    tree: &'t Tree,
-    rules: Rules,
-    style: Style,
-    reindent: indent::Reindent,
-) -> Doc<'t> {
-    let mut formatter = Formatter::new(tree, rules, style, reindent);
+fn build_doc<'t>(tree: &'t Tree, rules: Rules, style: Style, layout: indent::Layout) -> Doc<'t> {
+    let mut formatter = Formatter::new(tree, rules, style, layout);
     let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
@@ -205,8 +200,8 @@ struct Formatter<'t> {
     /// Where the tokens start whose trailing gap a rule prints itself, such
     /// as the line break before a `}`. Nested rules can each add one.
     trailing_skipped: Vec<TextSize>,
-    /// New indentation for lines whose indentation changes.
-    reindent: indent::Reindent,
+    /// Where lines go: frames, nested containers, and each line's offset.
+    layout: indent::Layout,
     /// Whether no code or comment has been printed yet: line breaks before
     /// the first one are dropped.
     at_file_start: bool,
@@ -238,12 +233,7 @@ enum Piece {
 }
 
 impl<'t> Formatter<'t> {
-    fn new(
-        tree: &'t Tree,
-        rules: Rules,
-        style: Style,
-        reindent: indent::Reindent,
-    ) -> Formatter<'t> {
+    fn new(tree: &'t Tree, rules: Rules, style: Style, layout: indent::Layout) -> Formatter<'t> {
         Formatter {
             tree,
             rules,
@@ -253,7 +243,7 @@ impl<'t> Formatter<'t> {
             copied_until: TextSize::from(0),
             leading_done: None,
             trailing_skipped: Vec::new(),
-            reindent,
+            layout,
             at_file_start: true,
             line_breaks: 0,
             style,
@@ -261,11 +251,22 @@ impl<'t> Formatter<'t> {
     }
 
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        // A frame places the lines inside it from the line it starts on.
+        if self.layout.frames_after_leading(node) {
+            let leading = self.leading_of(node);
+            leading + self.node_body(node).from_line_indent()
+        } else {
+            self.node_body(node)
+        }
+    }
+
+    fn node_body(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        if let Some(nested) = self.layout.container(node) {
+            return self.container(node, nested);
+        }
         // Alignment is layout, like indentation, so the fallback has it too.
-        if matches!(
-            node.kind(),
-            SyntaxKind::CaseBlock | SyntaxKind::IndentedCases | SyntaxKind::MatchType
-        ) && let Some(doc) = self.aligned_cases(node)
+        if is_case_list(node)
+            && let Some(doc) = self.aligned(&node.non_trivia_children().collect::<Vec<_>>())
         {
             return doc;
         }
@@ -275,6 +276,98 @@ impl<'t> Formatter<'t> {
             return doc;
         }
         self.fallback(node)
+    }
+
+    /// A container whose statements are placed from its frame: nested a
+    /// level deeper than the frame's line, or at its width for `case`
+    /// clauses written there. What's before them, such as the `{`, and the
+    /// `}` after them stay at the frame's line; comments before the `}` go
+    /// with the statements.
+    fn container(&mut self, node: SyntaxNode<'t>, nested: indent::Nested) -> Doc<'t> {
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let starts = children
+            .iter()
+            .position(|c| c.text_range().start() >= nested.inner.start())
+            .unwrap_or(children.len());
+        let ends = children
+            .iter()
+            .position(|c| c.text_range().start() >= nested.inner.end())
+            .unwrap_or(children.len())
+            .max(starts);
+        let (before, statements, after) = (
+            &children[..starts],
+            &children[starts..ends],
+            &children[ends..],
+        );
+
+        // A match type's frame starts at its `{`.
+        let frame_at = self
+            .layout
+            .frames_at(node)
+            .first()
+            .and_then(|&(at, _)| before.iter().position(|c| c.text_range().start() == at));
+        let mut outside = Vec::new();
+        let mut framed = Vec::new();
+        for (i, child) in before.iter().enumerate() {
+            if Some(i) == frame_at {
+                outside.push(self.leading_of_element(child));
+            }
+            let doc = self.element(*child);
+            if frame_at.is_some_and(|at| i >= at) {
+                framed.push(doc);
+            } else {
+                outside.push(doc);
+            }
+        }
+
+        let mut inner = match is_case_list(node)
+            .then(|| self.aligned(statements))
+            .flatten()
+        {
+            Some(doc) => doc,
+            None => Doc::concat(statements.iter().map(|c| self.element(*c))),
+        };
+        // The `}`'s leading trivia through its last comment: comments after
+        // the last statement. The line breaks after them all go with the
+        // `}`, so that dropping blank lines keeps the one before it.
+        let mut close = Vec::new();
+        if let Some(NodeOrToken::Token(token)) = after.first() {
+            let leading: Vec<_> = token.leading_trivia().collect();
+            let split = leading
+                .iter()
+                .rposition(|t| t.is_comment())
+                .map_or(0, |i| i + 1);
+            let mut docs = Vec::new();
+            self.trivia_within_lines(&mut docs, &leading[..split], Gap::LineStart, Some(token));
+            inner = inner + Doc::concat(docs);
+            self.trivia_within_lines(&mut close, &leading[split..], Gap::LineStart, Some(token));
+            self.leading_done = Some(token.text_range().start());
+        }
+        if nested.deeper {
+            inner = inner.nest();
+        }
+        framed.push(inner);
+        framed.extend(close);
+        framed.extend(after.iter().map(|c| self.element(*c)));
+        let framed = Doc::concat(framed);
+        Doc::concat(outside)
+            + if frame_at.is_some() {
+                framed.from_line_indent()
+            } else {
+                framed
+            }
+    }
+
+    /// The leading trivia of an element's first token, printed now.
+    fn leading_of_element(&mut self, element: &SyntaxElement<'t>) -> Doc<'t> {
+        match element {
+            NodeOrToken::Node(node) => self.leading_of(*node),
+            NodeOrToken::Token(token) => {
+                let doc = self.leading(*token);
+                self.leading_done = Some(token.text_range().start());
+                doc
+            }
+        }
     }
 
     /// The node's own rule, if its kind has one and it applies here.
@@ -739,8 +832,8 @@ impl<'t> Formatter<'t> {
     /// `=>`, which continues the run of the clause before it unless a blank
     /// line or a comment comes between them. The printer decides the
     /// padding. `None` when no two clauses are next to each other.
-    fn aligned_cases(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
-        let children: Vec<_> = node.non_trivia_children().collect();
+    /// `children` are a clause list's, or its statements'.
+    fn aligned(&mut self, children: &[SyntaxElement<'t>]) -> Option<Doc<'t>> {
         let alignable: Vec<bool> = children.iter().map(alignable_clause).collect();
         if !alignable.windows(2).any(|w| w[0] && w[1]) {
             return None;
@@ -771,7 +864,12 @@ impl<'t> Formatter<'t> {
                 == 1;
         let before = self.leading_of(clause);
         let head = Doc::concat(children[..arrow].iter().map(|c| self.element(*c)));
-        let tail = Doc::concat(children[arrow..].iter().map(|c| self.element(*c)));
+        let mut tail = Doc::concat(children[arrow..].iter().map(|c| self.element(*c)));
+        // The clause's frame, for a body on later lines: from the line the
+        // head is on, the same line the tail starts on.
+        if self.layout.frames_after_leading(clause) {
+            tail = tail.from_line_indent();
+        }
         Some(AlignPart::Row {
             before,
             head,
@@ -784,7 +882,36 @@ impl<'t> Formatter<'t> {
     /// its comments and whitespace.
     fn fallback(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         let children: Vec<_> = node.non_trivia_children().collect();
-        Doc::concat(children.into_iter().map(|child| self.element(child)))
+        // Frames from child tokens: each from a region's opener through
+        // the region.
+        let frames = self.layout.frames_at(node);
+        let mut docs = Vec::new();
+        let mut i = 0;
+        while i < children.len() {
+            let child = children[i];
+            let frame = frames
+                .iter()
+                .find(|(at, _)| child.text_range().start() == *at)
+                .and_then(|(_, end)| {
+                    let last = children[i..]
+                        .iter()
+                        .rposition(|c| c.text_range().start() < *end)?;
+                    Some(i + last + 1)
+                });
+            match frame {
+                Some(to) => {
+                    docs.push(self.leading_of_element(&child));
+                    let framed = Doc::concat(children[i..to].iter().map(|c| self.element(*c)));
+                    docs.push(framed.from_line_indent());
+                    i = to;
+                }
+                None => {
+                    docs.push(self.element(child));
+                    i += 1;
+                }
+            }
+        }
+        Doc::concat(docs)
     }
 
     fn element(&mut self, element: SyntaxElement<'t>) -> Doc<'t> {
@@ -915,6 +1042,8 @@ impl<'t> Formatter<'t> {
         mut before: Gap,
         next: Option<&SyntaxToken<'t>>,
     ) {
+        // Whether a line break before this point placed the line.
+        let mut placed = false;
         for (i, &t) in trivia.iter().enumerate() {
             let start = t.text_range().start();
             match t.kind() {
@@ -935,7 +1064,26 @@ impl<'t> Formatter<'t> {
                             continue;
                         }
                     }
-                    docs.push(self.trivia(t));
+                    // The line's indentation is the layout's, past blank
+                    // lines to the line with code or a comment.
+                    let line = trivia[i + 1..]
+                        .iter()
+                        .find(|t| !matches!(t.kind(), TriviaKind::Newline | TriviaKind::Whitespace))
+                        .map(|t| t.text_range().start())
+                        .or(next.map(|n| n.text_range().start()));
+                    match line
+                        .and_then(|l| self.layout.offset(l))
+                        .filter(|_| self.is_free(start))
+                    {
+                        Some(offset) => {
+                            docs.push(self.trivia(t).offset(offset));
+                            placed = true;
+                        }
+                        None => {
+                            docs.push(self.trivia(t));
+                            placed = false;
+                        }
+                    }
                     before = Gap::LineStart;
                 }
                 // A blank line's whitespace, which the printer would trim
@@ -948,8 +1096,13 @@ impl<'t> Formatter<'t> {
                             .get(i + 1)
                             .is_some_and(|t| t.kind() == TriviaKind::Newline) => {}
                 TriviaKind::Whitespace if before == Gap::LineStart && self.is_free(start) => {
-                    match self.reindent.width(t.text_range().end()) {
-                        Some(width) => docs.push(Doc::text(" ".repeat(width))),
+                    match self.layout.offset(t.text_range().end()) {
+                        // The line break put it there.
+                        Some(_) if placed => {}
+                        // The first line of the file.
+                        Some(offset) => {
+                            docs.push(Doc::text(" ".repeat(offset.max(0) as usize)));
+                        }
                         None => docs.push(self.trivia(t)),
                     }
                     before = Gap::Space;
@@ -962,12 +1115,6 @@ impl<'t> Formatter<'t> {
                 TriviaKind::Whitespace => {}
                 TriviaKind::LineComment | TriviaKind::BlockComment => {
                     let after_code = matches!(before, Gap::AfterCode | Gap::AfterComment);
-                    // A comment at column 0 that moves in.
-                    if before == Gap::LineStart
-                        && let Some(width) = self.reindent.width(start)
-                    {
-                        docs.push(Doc::text(" ".repeat(width)));
-                    }
                     let mut comment = Doc::Nil;
                     if after_code && self.free_at(start) {
                         comment = Doc::text(" ");
@@ -984,13 +1131,6 @@ impl<'t> Formatter<'t> {
                     before = Gap::AfterComment;
                 }
             }
-        }
-        // Code at column 0 that moves in.
-        if let Some(next) = next
-            && before == Gap::LineStart
-            && let Some(width) = self.reindent.width(next.text_range().start())
-        {
-            docs.push(Doc::text(" ".repeat(width)));
         }
         if let Some(next) = next
             && before == Gap::AfterComment
@@ -1072,30 +1212,16 @@ impl<'t> Formatter<'t> {
     fn verbatim_range(&self, v: VerbatimRange) -> Doc<'t> {
         let text = &self.text[v.range];
         let start = v.range.start();
-        let Some(width) = self
-            .reindent
-            .width(start)
-            .filter(|_| v.reason == VerbatimReason::Comment)
-        else {
+        if v.reason != VerbatimReason::Comment || self.layout.offset(start).is_none() {
             return Doc::verbatim(text);
-        };
+        }
         let line_start = self.text[..usize::from(start)]
             .rfind('\n')
             .map_or(0, |i| i + 1);
-        let shift = width as isize - (usize::from(start) - line_start) as isize;
-        let mut out = String::with_capacity(text.len());
-        for (i, line) in text.split_inclusive('\n').enumerate() {
-            if i == 0 || line.trim().is_empty() {
-                out.push_str(line);
-            } else if shift > 0 {
-                out.push_str(&" ".repeat(shift as usize));
-                out.push_str(line);
-            } else {
-                let spaces = line.len() - line.trim_start_matches(' ').len();
-                out.push_str(&line[spaces.min(shift.unsigned_abs())..]);
-            }
+        Doc::Relative {
+            text: text.into(),
+            column: self.text[line_start..usize::from(start)].chars().count(),
         }
-        Doc::verbatim(out)
     }
 
     fn plain(&self, range: TextRange, piece: Piece) -> Doc<'t> {
@@ -1116,6 +1242,14 @@ struct ListParts<'t> {
     items: Vec<Vec<SyntaxElement<'t>>>,
     /// The commas between the items, without a trailing one.
     commas: Vec<SyntaxToken<'t>>,
+}
+
+/// Whether the node holds `case` clauses that may be aligned.
+fn is_case_list(node: SyntaxNode<'_>) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::CaseBlock | SyntaxKind::IndentedCases | SyntaxKind::MatchType
+    )
 }
 
 /// Whether a child of a clause list can be aligned: a `case` clause that
