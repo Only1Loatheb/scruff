@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
@@ -21,6 +22,9 @@ struct Cli {
 enum Command {
     /// Format Scala files in place, or standard input to standard output
     ///
+    /// A directory stands for the files in it and below it, except hidden
+    /// ones and what `.gitignore` leaves out.
+    ///
     /// Each file follows the nearest `.scuff.toml` or `.scalafmt.conf` in
     /// its directory or above, `.scuff.toml` first: files its exclude paths
     /// leave out are skipped, and lines are kept within its maximum column.
@@ -29,8 +33,9 @@ enum Command {
     /// one can't be formatted: it can't be read or written, has syntax
     /// errors, or formatting would change what the code means.
     Format {
-        /// The files to format, each overwritten with the result; reads
-        /// standard input and prints the result when omitted or `-`
+        /// The files and directories to format, each file overwritten with
+        /// the result; reads standard input and prints the result when
+        /// omitted or `-`
         files: Vec<PathBuf>,
 
         /// Print nothing; instead exit with 1, naming each file that would
@@ -73,38 +78,42 @@ fn format(files: Vec<PathBuf>, check: bool) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // Each directory's configuration file, found once, and each file read
-    // once: many directories share one.
-    let mut locator = Locator::default();
-    let mut found: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
-    let mut configs: HashMap<PathBuf, Result<Config, String>> = HashMap::new();
+    let mut code = 0;
+    let Collected {
+        files,
+        configs,
+        messages,
+    } = collect_files(&files);
+    // What the walks couldn't read; the rest is still formatted.
+    for message in &messages {
+        eprintln!("error: {message}");
+        code = 2;
+    }
+    // A configuration that can't be read is reported once, and its files
+    // are left alone.
+    let mut reported = HashSet::new();
     for file in &files {
-        let path = found
-            .entry(directory_of(file))
-            .or_insert_with_key(|dir| locator.locate(dir));
-        if let Some(path) = path {
-            configs
-                .entry(path.clone())
-                .or_insert_with_key(|path| Config::load(path).map_err(|e| e.to_string()));
+        if let Some((path, Err(error))) = configs.for_file(file)
+            && reported.insert(path)
+        {
+            eprintln!("error: {error}");
+            code = 2;
         }
     }
 
     // Formatted in parallel; reported in the order given.
     let outcomes: Vec<Outcome> = files
         .par_iter()
-        .map(|file| {
-            let config = found[&directory_of(file)]
-                .as_ref()
-                .map(|path| &configs[path]);
-            match config {
-                Some(Err(error)) => Outcome::error(format!("error: {error}")),
-                Some(Ok(config)) if !config.includes(file) => Outcome::default(),
-                Some(Ok(config)) => format_file(file, Some(config), check),
-                None => format_file(file, None, check),
-            }
+        .map(|file| match configs.for_file(file) {
+            Some((_, Err(_))) => Outcome {
+                code: 2,
+                messages: String::new(),
+            },
+            Some((_, Ok(config))) if !config.includes(file) => Outcome::default(),
+            Some((_, Ok(config))) => format_file(file, Some(config), check),
+            None => format_file(file, None, check),
         })
         .collect();
-    let mut code = 0;
     for outcome in outcomes {
         eprint!("{}", outcome.messages);
         code = code.max(outcome.code);
@@ -126,6 +135,126 @@ impl Outcome {
             code: 2,
             messages: message + "\n",
         }
+    }
+}
+
+/// Each directory's configuration file, found once, and each file read
+/// once: many directories share one.
+#[derive(Default)]
+struct Configs {
+    locator: Locator,
+    found: HashMap<PathBuf, Option<PathBuf>>,
+    loaded: HashMap<PathBuf, Result<Config, String>>,
+}
+
+impl Configs {
+    /// Finds and reads the configuration for files in `dir`, if it's new.
+    fn load(&mut self, dir: &Path) {
+        if self.found.contains_key(dir) {
+            return;
+        }
+        let path = self.locator.locate(dir);
+        if let Some(path) = &path {
+            self.loaded
+                .entry(path.clone())
+                .or_insert_with_key(|path| Config::load(path).map_err(|e| e.to_string()));
+        }
+        self.found.insert(dir.to_path_buf(), path);
+    }
+
+    /// The configuration for files in `dir`, with its path, once loaded.
+    fn for_dir(&self, dir: &Path) -> Option<(&Path, &Result<Config, String>)> {
+        let path = self.found.get(dir)?.as_deref()?;
+        Some((path, &self.loaded[path]))
+    }
+
+    fn for_file(&self, file: &Path) -> Option<(&Path, &Result<Config, String>)> {
+        self.for_dir(&directory_of(file))
+    }
+}
+
+/// The files to format, in order, each once: the files named, and the ones
+/// found in the directories named.
+struct Collected {
+    files: Vec<PathBuf>,
+    configs: Configs,
+    /// What couldn't be read along the way.
+    messages: Vec<String>,
+}
+
+/// Each file named, and the files in each directory named, with their
+/// configurations. A directory's files are those its configuration
+/// includes, or Scala files when it has none; hidden files and what
+/// `.gitignore` leaves out are skipped, and so are directories the
+/// configuration excludes whole.
+fn collect_files(args: &[PathBuf]) -> Collected {
+    let configs = Arc::new(Mutex::new(Configs::default()));
+    let mut files = Vec::new();
+    let mut messages = Vec::new();
+    for arg in args {
+        if !arg.is_dir() {
+            files.push(arg.clone());
+            continue;
+        }
+        let prune = Arc::clone(&configs);
+        let walk = ignore::WalkBuilder::new(arg)
+            .sort_by_file_name(|a, b| a.cmp(b))
+            .filter_entry(move |entry| {
+                if entry.depth() == 0 || !entry.file_type().is_some_and(|t| t.is_dir()) {
+                    return true;
+                }
+                let mut configs = prune.lock().unwrap();
+                configs.load(entry.path());
+                !matches!(
+                    configs.for_dir(entry.path()),
+                    Some((_, Ok(config))) if config.excludes_dir(entry.path())
+                )
+            })
+            .build();
+        for entry in walk {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    messages.push(error.to_string());
+                    continue;
+                }
+            };
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let file = entry.into_path();
+            let mut configs = configs.lock().unwrap();
+            configs.load(&directory_of(&file));
+            let included = match configs.for_file(&file) {
+                Some((_, Ok(config))) => config.includes(&file),
+                _ => Config::included_by_default(&file),
+            };
+            if included {
+                files.push(file);
+            }
+        }
+    }
+
+    // Each file once, so no two threads write one file, even through a
+    // symbolic link.
+    let mut seen = HashSet::new();
+    files.retain(|file| {
+        let key = std::fs::canonicalize(file)
+            .or_else(|_| std::path::absolute(file))
+            .unwrap_or_else(|_| file.clone());
+        seen.insert(key)
+    });
+    let mut configs = Arc::into_inner(configs)
+        .expect("the walks are done")
+        .into_inner()
+        .unwrap();
+    for file in &files {
+        configs.load(&directory_of(file));
+    }
+    Collected {
+        files,
+        configs,
+        messages,
     }
 }
 

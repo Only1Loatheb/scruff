@@ -7,6 +7,7 @@ description = "formatter"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 hocon-parser = "1.14.2"
+ignore = "0.4"
 rayon = "1.12"
 regex = "1"
 text-size = "1.1.1"

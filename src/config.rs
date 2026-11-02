@@ -46,6 +46,9 @@ pub struct Config {
     pub max_column: usize,
     include: Vec<Matcher>,
     exclude: Vec<Matcher>,
+    /// Directories whose every file is excluded, from `glob:.../X/**`
+    /// exclude paths, matched as `glob:.../X`.
+    exclude_dirs: Vec<Matcher>,
 }
 
 #[derive(Debug)]
@@ -214,8 +217,14 @@ impl Config {
             include.push(Matcher::filter(&pattern)?);
         }
         let mut exclude = Vec::new();
+        let mut exclude_dirs = Vec::new();
         for pattern in patterns.exclude_paths {
             exclude.push(Matcher::path(&pattern)?);
+            if pattern.starts_with("glob:")
+                && let Some(dir) = pattern.strip_suffix("/**")
+            {
+                exclude_dirs.push(Matcher::path(dir)?);
+            }
         }
         for pattern in patterns.exclude_filters {
             exclude.push(Matcher::filter(&pattern)?);
@@ -225,7 +234,24 @@ impl Config {
             max_column,
             include,
             exclude,
+            exclude_dirs,
         })
+    }
+
+    /// Whether every file under `dir` is excluded, so a walk can skip it: a
+    /// `glob:.../X/**` exclude path matches it as `glob:.../X`, as scalafmt
+    /// prunes its walks.
+    pub fn excludes_dir(&self, dir: &Path) -> bool {
+        let path = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let path = path.to_string_lossy();
+        self.exclude_dirs.iter().any(|m| m.0.is_match(&path))
+    }
+
+    /// Whether a file with no configuration is one scuff formats when it
+    /// finds it in a directory: a `.scala`, `.sbt`, `.sc` or `.mill` file.
+    pub fn included_by_default(file: &Path) -> bool {
+        file.extension()
+            .is_some_and(|e| ["scala", "sbt", "sc", "mill"].iter().any(|x| e == *x))
     }
 
     /// Whether the project formats `file`: an include pattern matches its
@@ -479,6 +505,18 @@ mod tests {
     }
 
     #[test]
+    fn excluded_directories() {
+        let c = config(
+            r#"project.excludePaths = ["glob:**/gen/**", "glob:**/*.java", "regex:.*/old/.*"]"#,
+        );
+        assert!(c.excludes_dir(Path::new("/p/a/gen")));
+        assert!(!c.excludes_dir(Path::new("/p/a/gen2")));
+        assert!(!c.excludes_dir(Path::new("/p/a")));
+        // Only `glob:.../X/**` patterns name whole directories.
+        assert!(!c.excludes_dir(Path::new("/p/old")));
+    }
+
+    #[test]
     fn include_paths_replace_the_default() {
         let c = config(r#"project.includePaths = ["glob:**/presentation-compiler/**/*.scala"]"#);
         assert!(c.includes(Path::new("/p/presentation-compiler/src/A.scala")));
@@ -563,7 +601,10 @@ mod tests {
         std::fs::create_dir_all(&deeper).unwrap();
         let mut locator = Locator::default();
         assert_eq!(locator.locate(&deeper), Some(sub.join(SCALAFMT_FILE)));
-        assert_eq!(locator.locate(&sub.join("a")), Some(sub.join(SCALAFMT_FILE)));
+        assert_eq!(
+            locator.locate(&sub.join("a")),
+            Some(sub.join(SCALAFMT_FILE))
+        );
         assert_eq!(locator.locate(&dir), Some(dir.join(SCUFF_FILE)));
         std::fs::remove_dir_all(&dir).unwrap();
     }

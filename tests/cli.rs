@@ -225,3 +225,108 @@ fn scuff_toml_comes_before_scalafmt_conf() {
         "val x = f(\n  alpha,\n  beta,\n)\n"
     );
 }
+
+/// A project in its own git repository, with `files` at their paths.
+fn repository(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = project(name);
+    std::fs::create_dir_all(dir.join(".git")).unwrap();
+    for (path, contents) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    dir
+}
+
+fn read(dir: &Path, path: &str) -> String {
+    std::fs::read_to_string(dir.join(path)).unwrap()
+}
+
+#[test]
+fn a_directory_stands_for_its_scala_files() {
+    let dir = repository(
+        "walk",
+        &[
+            ("build.sbt", UNFORMATTED),
+            ("src/main/scala/A.scala", UNFORMATTED),
+            ("src/main/java/B.java", UNFORMATTED),
+            (".hidden/C.scala", UNFORMATTED),
+            ("target/D.scala", UNFORMATTED),
+            (".gitignore", "target/\n"),
+        ],
+    );
+    let out = scuff_in(&dir, &["format", "--check", "."], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "./build.sbt: would be reformatted\n./src/main/scala/A.scala: would be reformatted\n"
+    );
+    let out = scuff_in(&dir, &["format", "src"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(read(&dir, "src/main/scala/A.scala"), FORMATTED);
+    assert_eq!(read(&dir, "src/main/java/B.java"), UNFORMATTED);
+    assert_eq!(read(&dir, "build.sbt"), UNFORMATTED);
+}
+
+#[test]
+fn a_walk_follows_the_config_and_skips_excluded_directories() {
+    let dir = repository(
+        "walk_config",
+        &[
+            (
+                ".scuff.toml",
+                "include-paths = [\"glob:**.scala\", \"glob:**.txt\"]\nexclude-paths = [\"glob:**/gen/**\"]\n",
+            ),
+            ("A.scala", UNFORMATTED),
+            ("notes.txt", UNFORMATTED),
+            ("build.sbt", UNFORMATTED),
+            ("gen/B.scala", UNFORMATTED),
+        ],
+    );
+    let out = scuff_in(&dir, &["format", "--check", "."], "");
+    assert_eq!(
+        text(&out.stderr),
+        "./A.scala: would be reformatted\n./notes.txt: would be reformatted\n"
+    );
+}
+
+#[test]
+fn a_file_named_twice_is_formatted_once() {
+    let dir = repository("named_twice", &[("src/A.scala", UNFORMATTED)]);
+    let out = scuff_in(
+        &dir,
+        &["format", "--check", "src", "src/A.scala", "./src"],
+        "",
+    );
+    assert_eq!(text(&out.stderr), "src/A.scala: would be reformatted\n");
+}
+
+#[test]
+fn a_broken_config_is_reported_once() {
+    let dir = repository(
+        "broken_walk",
+        &[
+            (".scalafmt.conf", "maxColumn = wide\n"),
+            ("A.scala", UNFORMATTED),
+            ("B.scala", UNFORMATTED),
+        ],
+    );
+    let out = scuff_in(&dir, &["format", "."], "");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains(".scalafmt.conf: maxColumn"), "{stderr}");
+    assert_eq!(read(&dir, "A.scala"), UNFORMATTED);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_and_a_link_to_it_are_formatted_once() {
+    let dir = repository("linked", &[("src/A.scala", UNFORMATTED)]);
+    std::os::unix::fs::symlink("src/A.scala", dir.join("B.scala")).unwrap();
+    let out = scuff_in(&dir, &["format", "--check", "src/A.scala", "B.scala"], "");
+    assert_eq!(text(&out.stderr), "src/A.scala: would be reformatted\n");
+    // A walk doesn't follow links.
+    let out = scuff_in(&dir, &["format", "--check", "."], "");
+    assert_eq!(text(&out.stderr), "./src/A.scala: would be reformatted\n");
+}
