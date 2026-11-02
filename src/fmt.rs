@@ -1736,6 +1736,8 @@ mod tests {
                                 && crate::lossless_tree::is_type_wildcard_place(NodeOrToken::Node(
                                     *n,
                                 ))
+                            || matches!(n.kind(), SyntaxKind::Vararg | SyntaxKind::RepeatPattern)
+                                && rewrite::splice(&out, *n, new).is_some()
                     });
                     // Unless it's copied verbatim, as in `format: off`.
                     if let Some(node) =

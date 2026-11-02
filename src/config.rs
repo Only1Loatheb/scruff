@@ -26,7 +26,8 @@
 //!   form: regexes that must match somewhere in the path. Include filters
 //!   replace the default include paths unless those are set as well.
 //! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
-//!   `allowAsForImportRename` and `allowQuestionMarkAsTypeWildcard`, also under `fileOverride`, whose patterns
+//!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard` and
+//!   `allowPostfixStarVarargSplices`, also under `fileOverride`, whose patterns
 //!   are tried longest first, as in scalafmt. The dialect is `scala3` when
 //!   none is named.
 
@@ -74,6 +75,8 @@ pub struct Dialect {
     /// `List[?]` for `List[_]`. Without it, `?` is a type's name, as in
     /// kind-projector's `Either[A, ?]`, so it isn't rewritten back.
     pub question_mark_type_wildcard: bool,
+    /// `f(xs*)` for `f(xs: _*)`, and `case Seq(xs*)` for `case Seq(xs @ _*)`.
+    pub postfix_star_vararg_splices: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -91,6 +94,7 @@ impl Dialect {
         star_wildcard_import: true,
         as_for_import_rename: true,
         question_mark_type_wildcard: true,
+        postfix_star_vararg_splices: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -107,6 +111,7 @@ impl Dialect {
             star_wildcard_import: new_syntax,
             as_for_import_rename: new_syntax,
             question_mark_type_wildcard: new_syntax,
+            postfix_star_vararg_splices: new_syntax,
         })
     }
 }
@@ -119,6 +124,7 @@ struct DialectSetting {
     star_wildcard_import: Option<bool>,
     as_for_import_rename: Option<bool>,
     question_mark_type_wildcard: Option<bool>,
+    postfix_star_vararg_splices: Option<bool>,
 }
 
 impl DialectSetting {
@@ -139,6 +145,9 @@ impl DialectSetting {
         }
         if let Some(allow) = self.question_mark_type_wildcard {
             dialect.question_mark_type_wildcard = allow;
+        }
+        if let Some(allow) = self.postfix_star_vararg_splices {
+            dialect.postfix_star_vararg_splices = allow;
         }
         Ok(dialect)
     }
@@ -176,6 +185,9 @@ impl DialectSetting {
             }
             if let Some(allow) = flag("allowQuestionMarkAsTypeWildcard")? {
                 setting.question_mark_type_wildcard = Some(allow);
+            }
+            if let Some(allow) = flag("allowPostfixStarVarargSplices")? {
+                setting.postfix_star_vararg_splices = Some(allow);
             }
         }
         Ok(setting)
@@ -817,11 +829,13 @@ mod tests {
             star_wildcard_import: true,
             as_for_import_rename: true,
             question_mark_type_wildcard: true,
+            postfix_star_vararg_splices: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
             as_for_import_rename: false,
             question_mark_type_wildcard: false,
+            postfix_star_vararg_splices: false,
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
         assert_eq!(Dialect::named("Scala213Source3"), Some(new));
@@ -850,7 +864,10 @@ mod tests {
               "glob:**/scala-2/**" { runner.dialect = scala213 }
               "glob:**/src/main/scala-2/**" = scala213source3
               ".sbt" { runner.dialectOverride.allowStarWildcardImport = false }
-            ".sc" { runner.dialectOverride.allowQuestionMarkAsTypeWildcard = false }
+            ".sc" {
+              runner.dialectOverride.allowQuestionMarkAsTypeWildcard = false
+              runner.dialectOverride.allowPostfixStarVarargSplices = false
+            }
             }
             "#,
         );
@@ -865,6 +882,8 @@ mod tests {
         assert!(!dialect("/p/build.sbt").star_wildcard_import);
         assert!(dialect("/p/build.sbt").question_mark_type_wildcard);
         assert!(!dialect("/p/a.sc").question_mark_type_wildcard);
+        assert!(!dialect("/p/a.sc").postfix_star_vararg_splices);
+        assert!(dialect("/p/a.scala").postfix_star_vararg_splices);
         // With no file, the dialect no pattern changes.
         assert_eq!(c.dialect_for(None), base);
     }

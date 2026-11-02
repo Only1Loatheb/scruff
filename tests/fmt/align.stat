@@ -270,10 +270,10 @@ xs match {
    }
 >>>
 body match {
-  case '{ sum() }                       => Expr(0)
-  case '{ sum($n) }                     => n
-  case '{ sum(${ Varargs(args) }: _*) } => sumExpr(args)
-  case body                             => body
+  case '{ sum() }                    => Expr(0)
+  case '{ sum($n) }                  => n
+  case '{ sum(${ Varargs(args) }*) } => sumExpr(args)
+  case body                          => body
 }
 
 <<< complex (scala3/InlineTransparent.stat:94)

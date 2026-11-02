@@ -438,6 +438,7 @@ val a = method(0, 1, "", others*)
 
 <<< old apply (scala3/Vararg.stat:6)
 maxColumn = 80
+dialect = scala213
 ===
 val a = method(0, 1,"", others: _*)
 >>>
@@ -642,6 +643,8 @@ val y = f(xs.map { x =>
 }*)
 
 <<< a spaced vararg wildcard hugs its star
+dialect = scala213
+===
 val x = f(xs: _ *)
 >>>
 val x = f(xs: _*)

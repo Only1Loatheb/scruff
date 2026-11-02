@@ -16,7 +16,8 @@
 //! the same as the old: `import a.*` as `import a._`, `b as c` as `b => c`
 //! in an import or export, and braces around a lone rename mean nothing,
 //! `import a.b as c` as `import a.{b => c}`. A type wildcard `?` means the
-//! same as `_`: `List[?]` as `List[_]`.
+//! same as `_`: `List[?]` as `List[_]`. A vararg splice `xs*` means the same
+//! as `xs: _*`, and in a pattern as `xs @ _*`.
 
 use std::fmt;
 
@@ -171,13 +172,14 @@ fn is_type_wildcard_token(token: &SyntaxToken<'_>) -> bool {
     }
 }
 
-/// A token's field, or for a type wildcard's `_`, its node's: the node
-/// around it is skipped.
+/// A token's field, or, where the node around it is skipped, the node's.
 fn token_field(token: &SyntaxToken<'_>) -> Option<&'static str> {
     match token.parent() {
         Some(parent) if token.text() == "_" && is_type_wildcard_node(&parent) => {
             parent.field_name()
         }
+        // `xs` in `xs @ _*` is the pattern of `xs*`.
+        Some(parent) if is_old_splice_node(&parent) => parent.field_name(),
         _ => token.field_name(),
     }
 }
@@ -239,17 +241,56 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
         WalkEvent::Enter(NodeOrToken::Node(node)) | WalkEvent::Leave(NodeOrToken::Node(node))
             if is_transparent_block(&node)
                 || is_lone_rename_braces(&node)
-                || is_type_wildcard_node(&node) =>
+                || is_type_wildcard_node(&node)
+                || is_old_splice_node(&node) =>
         {
             None
         }
-        WalkEvent::Enter(NodeOrToken::Token(token)) if is_lone_rename_brace(&token) => None,
+        WalkEvent::Enter(NodeOrToken::Token(token)) if may_come_or_go(&token) => None,
         WalkEvent::Enter(NodeOrToken::Node(node)) => Some(Step::Enter(node)),
         WalkEvent::Leave(NodeOrToken::Node(node)) => Some(Step::Leave(node)),
-        WalkEvent::Enter(NodeOrToken::Token(token)) if is_trailing_comma(&token) => None,
         WalkEvent::Enter(NodeOrToken::Token(token)) => Some(Step::Token(token)),
         WalkEvent::Leave(NodeOrToken::Token(_)) => None,
     })
+}
+
+/// A token that means nothing, so it may come or go: a trailing comma,
+/// braces around a lone rename, and `: _` or `@ _` in a vararg splice.
+fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
+    is_trailing_comma(token) || is_lone_rename_brace(token) || is_old_splice_token(token)
+}
+
+/// What Scala 3 drops from a vararg splice: the wildcard in `xs: _*`, and in
+/// a pattern `xs @ _*`'s binding and wildcard, which leave `xs*`. A lone
+/// `_*` stays.
+fn is_old_splice_node(node: &SyntaxNode<'_>) -> bool {
+    let parent = node.parent();
+    let parent_kind = parent.map(|p| p.kind());
+    match node.kind() {
+        SyntaxKind::Wildcard => {
+            parent_kind == Some(SyntaxKind::Vararg)
+                || parent.is_some_and(|p| is_old_splice_node(&p))
+        }
+        SyntaxKind::CapturePattern => {
+            parent_kind == Some(SyntaxKind::RepeatPattern)
+                && node
+                    .child_by_field_name("pattern")
+                    .is_some_and(|p| p.kind() == SyntaxKind::Wildcard)
+        }
+        _ => false,
+    }
+}
+
+/// The tokens of what `is_old_splice_node` drops: `:`, `@` and `_`.
+fn is_old_splice_token(token: &SyntaxToken<'_>) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    match token.text() {
+        ":" => parent.kind() == SyntaxKind::Vararg,
+        "@" | "_" => is_old_splice_node(&parent),
+        _ => false,
+    }
 }
 
 /// Braces around a lone rename in an import or export, as in
@@ -371,7 +412,7 @@ fn comments(parse: &Tree) -> Vec<Comment<'_>> {
     let mut previous = None;
     let mut before_next = Vec::new();
     for token in parse.syntax().tokens().filter(SyntaxToken::owns_trivia) {
-        if is_trailing_comma(&token) || is_lone_rename_brace(&token) {
+        if may_come_or_go(&token) {
             before_next.extend(token.leading_trivia().filter(SyntaxTrivia::is_comment));
             for trivia in token.trailing_trivia().filter(SyntaxTrivia::is_comment) {
                 out.push(Comment {
@@ -382,7 +423,7 @@ fn comments(parse: &Tree) -> Vec<Comment<'_>> {
             }
             continue;
         }
-        let owner = Some((index, token.text()));
+        let owner = Some((index, new_token(&token).1));
         let leading: Vec<_> = before_next
             .drain(..)
             .chain(token.leading_trivia().filter(SyntaxTrivia::is_comment))
@@ -498,6 +539,42 @@ mod tests {
         differs("def f[F[_]] = 1\n", "def f[F[?]] = 1\n");
         differs("val a: List[_ + A] = b\n", "val a: List[? + A] = b\n");
         differs("val a: List[A] = b\n", "val a: List[?] = b\n");
+    }
+
+    #[test]
+    fn postfix_vararg_splices_mean_the_same() {
+        let old = "f(xs: _*)\nx match { case Seq(a, xs @ _*) => }\n";
+        let new = "f(xs*)\nx match { case Seq(a, xs*) => }\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // A comment after a dropped token goes with the one before.
+        assert_eq!(
+            check_equivalent("f(xs: /* c */ _*)\n", "f(xs /* c */ *)\n"),
+            Ok(())
+        );
+        differs(
+            "x match { case Seq(_*) => }\n",
+            "x match { case Seq(xs*) => }\n",
+        );
+        differs(
+            "x match { case Seq(xs @ _*) => }\n",
+            "x match { case Seq(ys*) => }\n",
+        );
+        differs(
+            "x match { case Seq(xs @ y*) => }\n",
+            "x match { case Seq(xs*) => }\n",
+        );
+    }
+
+    #[test]
+    fn comments_stay_on_a_rewritten_token() {
+        assert_eq!(
+            check_equivalent(
+                "val a: List[_ /* c */] = b\n",
+                "val a: List[? /* c */] = b\n"
+            ),
+            Ok(())
+        );
     }
 
     #[test]

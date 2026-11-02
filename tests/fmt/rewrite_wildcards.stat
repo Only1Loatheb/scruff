@@ -1,5 +1,5 @@
-# Type wildcards as `?` where the dialect allows it: in type arguments and
-# their bounds. The dialect is Scala 3 unless a case names another.
+# Type wildcards as `?` and vararg splices as `xs*` where the dialect
+# allows them. The dialect is Scala 3 unless a case names another.
 
 <<< type arguments
 def f(a: List[_], b: Map[_, Seq[_]]): Option[_] = None
@@ -44,3 +44,31 @@ val c: Functor[Either[A, ?]] = d
 >>>
 val a: List[_] = b
 val c: Functor[Either[A, ?]] = d
+
+<<< vararg splices
+f(xs: _*)
+g(a, h(b) : _ *)
+x match {
+  case Seq(a, xs @ _*) => 1
+  case Seq(_*) => 2
+}
+>>>
+f(xs*)
+g(a, h(b)*)
+x match {
+  case Seq(a, xs*) => 1
+  case Seq(_*)     => 2
+}
+
+<<< plain Scala 2.13 gets its vararg splices back
+dialect = scala213
+===
+f(xs*)
+x match {
+  case Seq(a, xs*) => 1
+}
+>>>
+f(xs: _*)
+x match {
+  case Seq(a, xs @ _*) => 1
+}

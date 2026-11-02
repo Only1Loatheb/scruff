@@ -7,6 +7,9 @@
 //! A type wildcard `_` becomes `?`, as in `List[?]`, where the dialect
 //! allows it. Not back: without it, `?` is a type's name.
 //!
+//! A vararg splice `f(xs: _*)` becomes `f(xs*)`, and `case Seq(xs @ _*)`
+//! becomes `case Seq(xs*)`, and back.
+//!
 //! Only tokens change; comments and whitespace stay where they are, and
 //! code copied verbatim, such as `format: off` blocks, is left alone.
 //! `check_equivalent` treats each old form and its new one as the same.
@@ -47,6 +50,13 @@ pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
                     let joins = text[end..].chars().next().is_some_and(is_operator_char);
                     let mark = if joins { "? " } else { "?" };
                     edits.push((token.text_range(), mark.to_string()));
+                }
+            }
+            SyntaxKind::Vararg | SyntaxKind::RepeatPattern => {
+                if let Some(edit) = splice(text, node, dialect.postfix_star_vararg_splices)
+                    .filter(|(range, _)| tree.verbatim_at(range.start()).is_none())
+                {
+                    edits.push(edit);
                 }
             }
             SyntaxKind::ArrowRenamedIdentifier if dialect.as_for_import_rename => {
@@ -112,6 +122,64 @@ pub(crate) fn after_a_path(rename: SyntaxNode<'_>) -> bool {
         .is_some_and(|t| t.text() == ".")
 }
 
+/// The edit that writes a vararg splice, `node`, as `xs*` when `postfix`,
+/// or else as `xs: _*`, or in a pattern `xs @ _*`: the text between `xs`
+/// and `*` replaced. None if it's already written so, or if a comment is in
+/// the way. `_*` in a pattern is the same in both.
+pub(super) fn splice(
+    text: &str,
+    node: SyntaxNode<'_>,
+    postfix: bool,
+) -> Option<(TextRange, String)> {
+    let mut children = node.non_trivia_children();
+    let (first, star) = (children.next()?, node.last_child_or_token()?);
+    if star.text() != "*" {
+        return None;
+    }
+    // The spliced name or expression.
+    let (spliced, written) = match (node.kind(), first.kind()) {
+        (SyntaxKind::Vararg, _) => {
+            let colon = children.next().is_some_and(|c| c.text() == ":");
+            (first, colon)
+        }
+        (_, SyntaxKind::CapturePattern) => {
+            let first = first.into_node()?;
+            if first.child_by_field_name("pattern")?.kind() != SyntaxKind::Wildcard {
+                return None;
+            }
+            (first.child_by_field_name("name")?, true)
+        }
+        (_, SyntaxKind::Identifier) => (first, false),
+        _ => return None,
+    };
+    if postfix != written {
+        return None;
+    }
+    let range = TextRange::new(spliced.text_range().end(), star.text_range().start());
+    let between = &text[range];
+    let in_the_way = if postfix {
+        // Only `: _` or `@ _` and spaces; and `xs*` mustn't make one name,
+        // as `foo_*` or `++*` would.
+        let last = spliced.text().chars().next_back()?;
+        !between
+            .chars()
+            .all(|c| c.is_whitespace() || matches!(c, ':' | '@' | '_'))
+            || last == '_'
+            || is_operator_char(last)
+    } else {
+        !between.chars().all(char::is_whitespace)
+    };
+    if in_the_way {
+        return None;
+    }
+    let replacement = match (postfix, node.kind()) {
+        (true, _) => "",
+        (false, SyntaxKind::Vararg) => ": _",
+        (false, _) => " @ _",
+    };
+    Some((range, replacement.to_string()))
+}
+
 /// A character of an operator such as `<:`, which `?` would join.
 fn is_operator_char(c: char) -> bool {
     "!#%&*+-/:<=>?@\\^|~".contains(c)
@@ -149,6 +217,7 @@ mod tests {
         star_wildcard_import: false,
         as_for_import_rename: false,
         question_mark_type_wildcard: false,
+        postfix_star_vararg_splices: false,
     };
 
     fn rewritten(source: &str, dialect: Dialect) -> String {
@@ -276,6 +345,34 @@ mod tests {
         // Without the new syntax, `?` is a name: kind-projector's
         // placeholder here.
         assert_eq!(rewrite(&parse("val a: F[Either[A, ?]] = b\n"), OLD), None);
+    }
+
+    #[test]
+    fn vararg_splices() {
+        for (old, new) in [
+            ("f(xs: _*)\n", "f(xs*)\n"),
+            ("f(a, g(b): _*)\n", "f(a, g(b)*)\n"),
+            ("new A(xs: _*)\n", "new A(xs*)\n"),
+            (
+                "x match { case Seq(a, xs @ _*) => }\n",
+                "x match { case Seq(a, xs*) => }\n",
+            ),
+        ] {
+            assert_eq!(rewritten(old, NEW), new, "{old}");
+            assert_eq!(rewritten(new, OLD), old, "{new}");
+        }
+        assert_eq!(rewritten("f(xs:_ *)\n", NEW), "f(xs*)\n");
+        for same in [
+            "x match { case Seq(_*) => }\n",
+            // `*` would join the name or operator.
+            "f(foo_ : _*)\n",
+            "f(a.++ : _*)\n",
+            // A comment in the way.
+            "f(xs /* c */ : _*)\n",
+        ] {
+            assert_eq!(rewrite(&parse(same), NEW), None, "{same}");
+        }
+        assert_eq!(rewrite(&parse("x match { case Seq(_*) => }\n"), OLD), None);
     }
 
     #[test]
