@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::T;
+
 mod indent;
 mod spacing;
 
@@ -537,13 +539,46 @@ impl<'t> Formatter<'t> {
     /// select chains in sbt's code. Field selects before the first call stay
     /// with the head: `sys.env` in `sys.env.get(k).map(f)`.
     fn select_chain(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        let ChainParts {
+            first_line,
+            segments,
+        } = self.chain_parts(node)?;
+        let leading = self.leading_of(node);
+        // Line breaks before a `.` go: the rule puts its own there.
+        let mut line = Vec::new();
+        for element in first_line {
+            if element.kind() == T!["."] {
+                self.skip_leading(&element);
+            }
+            line.push(self.element(element));
+        }
+        let mut rest = Vec::new();
+        for segment in segments {
+            rest.push(Doc::softline());
+            self.skip_leading(&segment[0]);
+            rest.extend(segment.into_iter().map(|e| self.element(e)));
+        }
+        Some(
+            leading
+                + (Doc::concat(line) + Doc::concat(rest).nest())
+                    .group()
+                    .from_line_indent(),
+        )
+    }
+
+    /// The parts of a chain the [`Self::select_chain`] rule lays out, or
+    /// `None` if it keeps the chain as written: it's part of a longer chain,
+    /// has fewer than two calls or comments inside, a part that doesn't
+    /// print on one line, or a line break anywhere but before a `.`.
+    fn chain_parts(&self, node: SyntaxNode<'t>) -> Option<ChainParts<'t>> {
         // Only the outermost node of a chain; the ones inside are its parts.
         if let Some(parent) = node.parent()
             && chain_spine(parent).is_some_and(|spine| spine == NodeOrToken::Node(node))
         {
             return None;
         }
-        if !self.can_break(node) {
+        chain_spine(node)?;
+        if !self.can_relayout(node) {
             return None;
         }
         // Walk down the spine, from the last select to the head. `pending`
@@ -577,25 +612,37 @@ impl<'t> Formatter<'t> {
         if calls < 2 {
             return None;
         }
-
-        let leading = self.leading_of(node);
-        let mut first_line = vec![self.element(head)];
-        first_line.extend(pending.into_iter().rev().map(|e| self.element(e)));
+        let mut first_line = vec![head];
+        first_line.extend(pending.into_iter().rev());
         let mut segments = segments.into_iter().map(|(segment, _)| segment);
         for segment in segments.by_ref().take(first_call) {
-            first_line.extend(segment.into_iter().map(|e| self.element(e)));
+            first_line.extend(segment);
         }
-        let mut rest = Vec::new();
-        for segment in segments {
-            rest.push(Doc::softline());
-            rest.extend(segment.into_iter().map(|e| self.element(e)));
+        let segments: Vec<_> = segments.collect();
+
+        // Each part prints on one line, and the source breaks lines only
+        // before a `.`, in a gap the spacing rules decide, so the chain
+        // printed flat matches the fallback.
+        let elements: Vec<_> = first_line.iter().chain(segments.iter().flatten()).collect();
+        if !elements.iter().all(|e| self.prints_on_one_line(e)) {
+            return None;
         }
-        Some(
-            leading
-                + (Doc::concat(first_line) + Doc::concat(rest).nest())
-                    .group()
-                    .from_line_indent(),
-        )
+        for pair in elements.windows(2) {
+            let (Some(left), Some(right)) = (last_code_token(pair[0]), first_code_token(pair[1]))
+            else {
+                return None;
+            };
+            let gap = TextRange::new(left.text_range().end(), right.text_range().start());
+            if self.text[gap].contains(['\n', '\r'])
+                && (right.kind() != T!["."] || self.rule_between(&left, &right) != Some(false))
+            {
+                return None;
+            }
+        }
+        Some(ChainParts {
+            first_line,
+            segments,
+        })
     }
 
     /// A boolean chain, such as `a && b && c`: on one line if it fits,
@@ -749,7 +796,9 @@ impl<'t> Formatter<'t> {
         let NodeOrToken::Node(node) = element else {
             return false;
         };
-        if self.rules == Rules::Structural && self.list_parts(*node).is_some() {
+        if self.rules == Rules::Structural
+            && (self.list_parts(*node).is_some() || self.chain_parts(*node).is_some())
+        {
             return true;
         }
         let children: Vec<_> = node.non_trivia_children().collect();
@@ -1232,6 +1281,15 @@ impl<'t> Formatter<'t> {
             _ => Doc::text(text),
         }
     }
+}
+
+/// A chain split for [`Formatter::select_chain`].
+struct ChainParts<'t> {
+    /// The head, with what stays on its line: arguments right after it, and
+    /// field selects before the first call.
+    first_line: Vec<SyntaxElement<'t>>,
+    /// The rest, from the first call's `.` on: each starts with its `.`.
+    segments: Vec<Vec<SyntaxElement<'t>>>,
 }
 
 /// A list split for [`Formatter::list`].

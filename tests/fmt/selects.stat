@@ -84,9 +84,69 @@ val zs = xs
   )
   .filter(ok)
 
-<<< a chain written over several lines keeps its line breaks
+<<< a chain written over several lines is joined if it fits
 val ys = xs.map(f)
   .filter(g).take(n)
+val zs = sys
+  .env
+  .get(k)
+  .map(f)
 >>>
-val ys = xs.map(f)
-  .filter(g).take(n)
+val ys = xs.map(f).filter(g).take(n)
+val zs = sys.env.get(k).map(f)
+
+<<< the source's line breaks don't matter: these come out the same
+val ys = xs.map(transform).filter(good)
+  .take(n)
+val ys = xs
+  .map(transform).filter(good).take(n)
+val ys = xs.map(transform)
+  .filter(good)
+  .take(n)
+>>>
+val ys = xs
+  .map(transform)
+  .filter(good)
+  .take(n)
+val ys = xs
+  .map(transform)
+  .filter(good)
+  .take(n)
+val ys = xs
+  .map(transform)
+  .filter(good)
+  .take(n)
+
+<<< a chain with a part over several lines keeps its line breaks
+val ys = xs
+  .map { x =>
+    x + 1
+  }
+  .filter(g)
+>>>
+val ys = xs
+  .map { x =>
+    x + 1
+  }
+  .filter(g)
+
+<<< a chain with a comment keeps its line breaks
+val ys = xs
+  // evens
+  .filter(even)
+  .map(f)
+>>>
+val ys = xs
+  // evens
+  .filter(even)
+  .map(f)
+
+<<< a chain inside a list is joined with it
+val x = f(
+  xs
+    .map(g)
+    .filter(h),
+  y,
+)
+>>>
+val x = f(xs.map(g).filter(h), y)
