@@ -75,6 +75,21 @@ pub enum Doc<'a> {
     /// Rows, each starting its own line, whose tails line up where they
     /// fit. See [`AlignPart`].
     Align(Vec<AlignPart<'a>>),
+    /// `body`, then `marker` on a line of its own if `body` printed over
+    /// at least `min_breaks` line breaks, counted from its start or from
+    /// the last [`Doc::CountFrom`] in it. The marker goes at the
+    /// indentation of the line `body` starts on, and counts toward the
+    /// line breaks of an end marker around it. For Scala 3's `end f`,
+    /// which a long block gets and a short one doesn't.
+    EndMarker {
+        body: Box<Doc<'a>>,
+        marker: Box<Doc<'a>>,
+        min_breaks: usize,
+    },
+    /// Where the innermost [`Doc::EndMarker`] around it starts counting
+    /// line breaks: at its last block, which the marker closes as a `}`
+    /// would, so `end if` doesn't follow a short `else`. Prints nothing.
+    CountFrom,
 }
 
 /// A part of [`Doc::Align`].
@@ -196,13 +211,27 @@ impl<'a> Doc<'a> {
         Doc::BreakParent
     }
 
+    pub fn count_from() -> Doc<'a> {
+        Doc::CountFrom
+    }
+
+    /// This document, then `marker` on a line of its own if this one prints
+    /// over at least `min_breaks` line breaks. See [`Doc::EndMarker`].
+    pub fn end_marker(self, marker: impl Into<Cow<'a, str>>, min_breaks: usize) -> Doc<'a> {
+        Doc::EndMarker {
+            body: Box::new(self),
+            marker: Box::new(Doc::text(marker)),
+            min_breaks,
+        }
+    }
+
     /// The width of this document up to its first place a line can break,
     /// printed flat until there: what's left on a line when it breaks as
     /// early as it can. A line suffix takes no width.
     fn width_to_first_break(&self) -> usize {
         fn walk(doc: &Doc<'_>, width: &mut usize) -> bool {
             match doc {
-                Doc::Nil | Doc::LineSuffix(_) | Doc::BreakParent => false,
+                Doc::Nil | Doc::LineSuffix(_) | Doc::BreakParent | Doc::CountFrom => false,
                 Doc::Text(text) => {
                     *width += self::width(text);
                     false
@@ -223,7 +252,8 @@ impl<'a> Doc<'a> {
                 | Doc::Offset(_, inner)
                 | Doc::FromLineIndent(inner)
                 | Doc::Group(inner)
-                | Doc::ReluctantGroup(inner) => walk(inner, width),
+                | Doc::ReluctantGroup(inner)
+                | Doc::EndMarker { body: inner, .. } => walk(inner, width),
                 Doc::IfBreak { flat, .. } => walk(flat, width),
                 Doc::Align(parts) => parts
                     .iter()
@@ -251,7 +281,7 @@ impl<'a> Doc<'a> {
     fn flat_width_counting(&self, suffixes: bool) -> Option<usize> {
         match self {
             Doc::LineSuffix(inner) if suffixes => inner.flat_width_counting(true),
-            Doc::Nil | Doc::LineSuffix(_) => Some(0),
+            Doc::Nil | Doc::LineSuffix(_) | Doc::CountFrom => Some(0),
             Doc::Text(text) => Some(width(text)),
             Doc::Verbatim(text) | Doc::Relative { text, .. } if text.contains(['\n', '\r']) => None,
             Doc::Verbatim(text) | Doc::Relative { text, .. } => Some(width(text)),
@@ -266,7 +296,8 @@ impl<'a> Doc<'a> {
             | Doc::Offset(_, inner)
             | Doc::FromLineIndent(inner)
             | Doc::Group(inner)
-            | Doc::ReluctantGroup(inner) => inner.flat_width_counting(suffixes),
+            | Doc::ReluctantGroup(inner)
+            | Doc::EndMarker { body: inner, .. } => inner.flat_width_counting(suffixes),
             Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
             Doc::Align(parts) => parts
                 .iter()
@@ -358,10 +389,31 @@ enum Item<'d, 'a> {
     Doc(&'d Doc<'a>),
     /// Spaces that line up a [`Doc::Align`] row.
     Padding(usize),
+    /// The end of a [`Doc::EndMarker`]'s body: its marker, printed if the
+    /// body took at least `min_breaks` line breaks since it started
+    /// counting.
+    EndMarker {
+        marker: &'d Doc<'a>,
+        min_breaks: usize,
+    },
+}
+
+/// The line break before a [`Doc::EndMarker`]'s marker.
+static HARD_LINE: Doc<'static> = Doc::Line(LineKind::Hard);
+
+/// The line breaks in printed text.
+fn line_breaks(text: &str) -> usize {
+    text.bytes().filter(|&b| b == b'\n').count()
 }
 
 fn width(text: &str) -> usize {
     text.chars().count()
+}
+
+/// The spaces and tabs that start the last line of `out`.
+fn line_indentation(out: &str) -> &str {
+    let line = &out[out.rfind(['\n', '\r']).map_or(0, |i| i + 1)..];
+    &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
 /// Lays out `doc` within `options.max_width` where it can. Lines never end
@@ -382,6 +434,10 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
     let mut suffixes: Vec<Command<'_, '_>> = Vec::new();
     // Trimming trailing spaces must not reach back into verbatim text.
     let mut verbatim_end = 0;
+    // Line breaks printed so far, and for each end marker being printed,
+    // innermost last, how many there were when it started counting.
+    let mut breaks = 0;
+    let mut counting_since: Vec<usize> = Vec::new();
 
     while let Some(command) = commands.pop() {
         let Command {
@@ -398,6 +454,22 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
             Item::Padding(spaces) => {
                 out.push_str(&" ".repeat(spaces));
                 column += spaces;
+                continue;
+            }
+            Item::EndMarker { marker, min_breaks } => {
+                let since = counting_since.pop().unwrap_or(breaks);
+                if breaks - since >= min_breaks {
+                    // Its own line, at the body's first line's indentation.
+                    let marker_line = Command {
+                        doc: Item::Doc(marker),
+                        ..command
+                    };
+                    commands.push(marker_line);
+                    commands.push(Command {
+                        doc: Item::Doc(&HARD_LINE),
+                        ..command
+                    });
+                }
                 continue;
             }
             Item::Doc(doc) => doc,
@@ -419,6 +491,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
             Doc::Verbatim(text) => {
                 out.push_str(text);
                 verbatim_end = out.len();
+                breaks += line_breaks(text);
                 column = match text.rfind(['\n', '\r']) {
                     Some(i) => width(&text[i + 1..]),
                     None => column + width(text),
@@ -440,6 +513,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 }
                 out.push_str(&moved);
                 verbatim_end = out.len();
+                breaks += line_breaks(&moved);
                 column = match moved.rfind(['\n', '\r']) {
                     Some(i) => width(&moved[i + 1..]),
                     None => column + width(&moved),
@@ -455,15 +529,37 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 ..part(inner)
             }),
             Doc::FromLineIndent(inner) => {
-                let line = &out[out.rfind(['\n', '\r']).map_or(0, |i| i + 1)..];
-                let leading = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
-                bases.push(leading.to_string());
+                bases.push(line_indentation(&out).to_string());
                 commands.push(Command {
                     base: bases.len() - 1,
                     indent: 0,
                     offset: 0,
                     ..part(inner)
                 });
+            }
+            Doc::EndMarker {
+                body,
+                marker,
+                min_breaks,
+            } => {
+                bases.push(line_indentation(&out).to_string());
+                commands.push(Command {
+                    base: bases.len() - 1,
+                    indent: 0,
+                    offset: 0,
+                    mode: Mode::Break,
+                    doc: Item::EndMarker {
+                        marker,
+                        min_breaks: *min_breaks,
+                    },
+                });
+                counting_since.push(breaks);
+                commands.push(part(body));
+            }
+            Doc::CountFrom => {
+                if let Some(since) = counting_since.last_mut() {
+                    *since = breaks;
+                }
             }
             Doc::Group(inner) | Doc::ReluctantGroup(inner) => {
                 let flat = Command {
@@ -520,6 +616,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     let trimmed = out.trim_end_matches([' ', '\t']).len();
                     out.truncate(trimmed.max(verbatim_end));
                     out.push_str(&options.line_ending);
+                    breaks += 1;
                     if offset == 0 {
                         out.push_str(&bases[base]);
                         for _ in 0..indent {
@@ -645,7 +742,7 @@ fn align(
 fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> Option<usize> {
     fn walk(doc: &Doc<'_>, line_indent: usize, indent_width: usize, column: &mut Option<usize>) {
         match doc {
-            Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
+            Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) | Doc::CountFrom => {}
             Doc::Text(text) => {
                 if let Some(c) = column {
                     *c += width(text);
@@ -670,7 +767,10 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
                 let line_indent = (line_indent as isize + columns).max(0) as usize;
                 walk(inner, line_indent, indent_width, column);
             }
-            Doc::FromLineIndent(inner) | Doc::Group(inner) | Doc::ReluctantGroup(inner) => {
+            Doc::FromLineIndent(inner)
+            | Doc::Group(inner)
+            | Doc::ReluctantGroup(inner)
+            | Doc::EndMarker { body: inner, .. } => {
                 walk(inner, line_indent, indent_width, column);
             }
             Doc::IfBreak { broken, .. } => walk(broken, line_indent, indent_width, column),
@@ -707,10 +807,12 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
                 room -= spaces as isize;
                 continue;
             }
+            // A marker starts its own line, so the line ends before it.
+            Item::EndMarker { .. } => continue,
             Item::Doc(doc) => doc,
         };
         match doc {
-            Doc::Nil | Doc::LineSuffix(_) => {}
+            Doc::Nil | Doc::LineSuffix(_) | Doc::CountFrom => {}
             Doc::Text(text) => room -= width(text) as isize,
             Doc::Verbatim(text) | Doc::Relative { text, .. } => match text.find(['\n', '\r']) {
                 Some(_) if mode == Mode::Flat => return false,
@@ -728,7 +830,8 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             Doc::Nest(inner)
             | Doc::Offset(_, inner)
             | Doc::FromLineIndent(inner)
-            | Doc::Group(inner) => {
+            | Doc::Group(inner)
+            | Doc::EndMarker { body: inner, .. } => {
                 stack.push((mode, Item::Doc(inner)));
             }
             // Never counted on to break.
@@ -770,6 +873,58 @@ mod tests {
     fn call<'a>(name: &'a str, args: Vec<Doc<'a>>) -> Doc<'a> {
         let args = Doc::join(args, t(",") + Doc::line());
         (t(name) + t("(") + (Doc::softline() + args).nest() + Doc::softline() + t(")")).group()
+    }
+
+    /// `def name =` with `n` statements indented below, marked at 3 breaks.
+    fn def_with(name: &'static str, n: usize) -> Doc<'static> {
+        let body = (0..n).map(|_| Doc::hardline() + t("a"));
+        (t("def ") + t(name) + t(" =") + Doc::concat(body).nest())
+            .end_marker(format!("end {name}"), 3)
+    }
+
+    #[test]
+    fn an_end_marker_follows_a_long_body_only() {
+        assert_eq!(at(80, &def_with("f", 2)), "def f =\n  a\n  a");
+        assert_eq!(at(80, &def_with("f", 3)), "def f =\n  a\n  a\n  a\nend f");
+    }
+
+    #[test]
+    fn an_end_marker_goes_at_its_first_lines_indentation() {
+        let doc = t("object A:") + (Doc::hardline() + def_with("f", 3)).nest();
+        let expected = "object A:\n  def f =\n    a\n    a\n    a\n  end f";
+        assert_eq!(at(80, &doc), expected);
+    }
+
+    #[test]
+    fn inner_end_markers_count_toward_outer_ones() {
+        // Four breaks to the inner body's end, and a fifth for its marker.
+        let inner = (Doc::hardline() + def_with("f", 3)).nest();
+        let outer = (t("def g =") + inner).end_marker("end g", 5);
+        assert_eq!(
+            at(80, &outer),
+            "def g =\n  def f =\n    a\n    a\n    a\n  end f\nend g"
+        );
+    }
+
+    #[test]
+    fn an_end_marker_counts_from_its_last_block() {
+        // `if c then` with three lines, `else` with one.
+        let branch = |n: usize| Doc::concat((0..n).map(|_| Doc::hardline() + t("a"))).nest();
+        let doc = |else_lines| {
+            let then = t("if c then") + branch(3) + Doc::hardline();
+            (then + Doc::count_from() + t("else") + branch(else_lines)).end_marker("end if", 3)
+        };
+        let short = "if c then\n  a\n  a\n  a\nelse\n  a";
+        assert_eq!(at(80, &doc(1)), short);
+        let long = "if c then\n  a\n  a\n  a\nelse\n  a\n  a\n  a\nend if";
+        assert_eq!(at(80, &doc(3)), long);
+    }
+
+    #[test]
+    fn an_end_marker_counts_the_breaks_the_printer_chose() {
+        let doc = call("f", vec![t("a"), t("b")]).end_marker("end f", 3);
+        assert_eq!(at(80, &doc), "f(a, b)");
+        assert_eq!(at(6, &doc), "f(\n  a,\n  b\n)\nend f");
     }
 
     #[test]

@@ -37,7 +37,6 @@ object Main:
       case Color.Red => "red"
       case _         => "other"
   end show
-end Main
 >>>
 enum Color:
   case Red, Green
@@ -48,7 +47,6 @@ object Main:
       case Color.Red => "red"
       case _         => "other"
   end show
-end Main
 
 <<< spacing within a line is normalized, indentation is kept
 maxColumn = 20

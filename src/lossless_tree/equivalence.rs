@@ -23,7 +23,8 @@
 //! mean the same as Scala 3's indentation: `def f = { a }` as `def f =` with
 //! `a` indented below, and `class A { ... }` as `class A:`. A braced argument
 //! means the same as a colon argument: `xs.map { x => a }` as `xs.map: x =>`
-//! with `a` indented below.
+//! with `a` indented below. An end marker, as `end f` after `def f =`, may
+//! be added or removed where it names what it ends: it means nothing.
 
 use std::fmt;
 
@@ -274,7 +275,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_condition_parens(&node)
                 || is_case_body_block(&node)
                 || is_argument_wrapper(&node)
-                || is_lone_catch_case(&node) =>
+                || is_lone_catch_case(&node)
+                || is_optional_end_marker(&node) =>
         {
             None
         }
@@ -287,9 +289,11 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
 }
 
 /// A token that means nothing, so it may come or go: a trailing comma,
-/// braces around a lone rename, and `: _` or `@ _` in a vararg splice.
+/// braces around a lone rename, `: _` or `@ _` in a vararg splice, and an
+/// end marker's.
 fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
     is_trailing_comma(token)
+        || token.parent().is_some_and(|p| is_optional_end_marker(&p))
         || is_lone_rename_brace(token)
         || is_old_splice_token(token)
         || is_control_token(token)
@@ -301,6 +305,14 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
             && std::iter::successors(token.next_sibling_or_token(), |e| e.next_sibling_or_token())
                 .find(|e| !e.is_trivia())
                 .is_some_and(|e| e.kind() == SyntaxKind::ColonArgument))
+}
+
+/// An end marker that names what tree-sitter-scala attached it to, as
+/// `end f` in `def f =`. One attached to something else, as an `end if`
+/// read as ending an outer `if`, counts: the code would mean something
+/// else.
+fn is_optional_end_marker(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::EndMarker && node.end_marker_matches_parent()
 }
 
 /// A `case` clause's body in braces, as in `case a => { b; c }`, which
@@ -868,6 +880,17 @@ mod tests {
         differs("import a.{b => c}\n", "import a.{b as d}\n");
         // Only in imports: a `*` elsewhere is a different name.
         differs("val x = a _\n", "val x = a *\n");
+    }
+
+    #[test]
+    fn an_end_marker_may_come_or_go() {
+        let without = "object A:\n  def f =\n    a\n    b\n  def g = 1\n";
+        let with = "object A:\n  def f =\n    a\n    b\n  end f\n  def g = 1\nend A\n";
+        assert_eq!(check_equivalent(without, with), Ok(()));
+        assert_eq!(check_equivalent(with, without), Ok(()));
+        // Moving the statements after it into the region does not.
+        let moved = "object A:\n  def f =\n    a\n    b\n    def g = 1\n  end f\n";
+        assert!(check_equivalent(without, moved).is_err());
     }
 
     #[test]

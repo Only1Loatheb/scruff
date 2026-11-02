@@ -1,0 +1,807 @@
+# Scala 3 end markers, as scalafmt's `rewrite.scala3.endMarker.insert`
+# with sbt's `breaks.min = 20`: a statement that owns a region of
+# significant indentation gets `end name` when its last block prints over
+# 20 line breaks or more, counting from the line the block opens on, as
+# with scalafmt's `spanHas = lastBlockOnly`: the marker closes it as a `}`
+# would. Only where the statement is in a template, the file, or a block
+# of more than one statement. A marker already there is the printer's to
+# keep or drop by the same rule.
+
+<<< 20 line breaks get a marker, 19 don't
+object A {
+  def long =
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  def short =
+    b0()
+    b1()
+    b2()
+    b3()
+    b4()
+    b5()
+    b6()
+    b7()
+    b8()
+    b9()
+    b10()
+    b11()
+    b12()
+    b13()
+    b14()
+    b15()
+    b16()
+    b17()
+    b18()
+}
+>>>
+object A:
+  def long =
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  end long
+  def short =
+    b0()
+    b1()
+    b2()
+    b3()
+    b4()
+    b5()
+    b6()
+    b7()
+    b8()
+    b9()
+    b10()
+    b11()
+    b12()
+    b13()
+    b14()
+    b15()
+    b16()
+    b17()
+    b18()
+end A
+
+<<< whether it's long depends on where lines break
+maxColumn = 18
+===
+object W:
+  def f =
+    f0(alpha, beta)
+    f1(alpha, beta)
+    f2(alpha, beta)
+    f3(alpha, beta)
+    f4(alpha, beta)
+    f5(alpha, beta)
+    f6(alpha, beta)
+    f7(alpha, beta)
+    f8(alpha, beta)
+  def g = 1
+>>>
+object W:
+  def f =
+    f0(
+      alpha,
+      beta,
+    )
+    f1(
+      alpha,
+      beta,
+    )
+    f2(
+      alpha,
+      beta,
+    )
+    f3(
+      alpha,
+      beta,
+    )
+    f4(
+      alpha,
+      beta,
+    )
+    f5(
+      alpha,
+      beta,
+    )
+    f6(
+      alpha,
+      beta,
+    )
+    f7(
+      alpha,
+      beta,
+    )
+    f8(
+      alpha,
+      beta,
+    )
+  end f
+  def g = 1
+end W
+
+<<< same code, wide enough to stay short
+object W:
+  def f =
+    f0(alpha, beta)
+    f1(alpha, beta)
+    f2(alpha, beta)
+    f3(alpha, beta)
+    f4(alpha, beta)
+    f5(alpha, beta)
+    f6(alpha, beta)
+    f7(alpha, beta)
+    f8(alpha, beta)
+  def g = 1
+>>>
+object W:
+  def f =
+    f0(alpha, beta)
+    f1(alpha, beta)
+    f2(alpha, beta)
+    f3(alpha, beta)
+    f4(alpha, beta)
+    f5(alpha, beta)
+    f6(alpha, beta)
+    f7(alpha, beta)
+    f8(alpha, beta)
+  def g = 1
+
+<<< a marker closes the last block, so a short else gets none
+def f =
+  val x = 1
+  if x > 0 then
+    c0()
+    c1()
+    c2()
+    c3()
+    c4()
+    c5()
+    c6()
+    c7()
+    c8()
+    c9()
+    c10()
+    c11()
+    c12()
+    c13()
+    c14()
+    c15()
+    c16()
+    c17()
+    c18()
+    c19()
+  else
+    d()
+  x
+>>>
+def f =
+  val x = 1
+  if x > 0 then
+    c0()
+    c1()
+    c2()
+    c3()
+    c4()
+    c5()
+    c6()
+    c7()
+    c8()
+    c9()
+    c10()
+    c11()
+    c12()
+    c13()
+    c14()
+    c15()
+    c16()
+    c17()
+    c18()
+    c19()
+  else d()
+  x
+end f
+
+<<< a body of one expression is no region
+object S:
+  def f =
+    xs.foreach: x =>
+      e0()
+      e1()
+      e2()
+      e3()
+      e4()
+      e5()
+      e6()
+      e7()
+      e8()
+      e9()
+      e10()
+      e11()
+      e12()
+      e13()
+      e14()
+      e15()
+      e16()
+      e17()
+      e18()
+      e19()
+  def g = 1
+>>>
+object S:
+  def f =
+    xs.foreach: x =>
+      e0()
+      e1()
+      e2()
+      e3()
+      e4()
+      e5()
+      e6()
+      e7()
+      e8()
+      e9()
+      e10()
+      e11()
+      e12()
+      e13()
+      e14()
+      e15()
+      e16()
+      e17()
+      e18()
+      e19()
+  def g = 1
+end S
+
+<<< the marker goes after a trailing comment, before the next line's
+object C:
+  def f = // why
+    g0()
+    g1()
+    g2()
+    g3()
+    g4()
+    g5()
+    g6()
+    g7()
+    g8()
+    g9()
+    g10()
+    g11()
+    g12()
+    g13()
+    g14()
+    g15()
+    g16()
+    g17()
+    g18()
+    g19()
+  // next
+  def h = 1
+>>>
+object C:
+  def f = // why
+    g0()
+    g1()
+    g2()
+    g3()
+    g4()
+    g5()
+    g6()
+    g7()
+    g8()
+    g9()
+    g10()
+    g11()
+    g12()
+    g13()
+    g14()
+    g15()
+    g16()
+    g17()
+    g18()
+    g19()
+  end f
+  // next
+  def h = 1
+end C
+
+<<< braces stay without a marker
+object A:
+  def f = {
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  }.toString
+>>>
+object A:
+  def f = {
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  }.toString
+end A
+
+<<< Scala 2 has no end markers
+dialect = scala213
+===
+object A {
+  def f = {
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  }
+}
+>>>
+object A {
+  def f = {
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  }
+}
+
+<<< an else if chain gets one marker, which tree-sitter-scala puts on its last if
+object O:
+  def k(x: Int): String =
+    val f = 1
+    if a then "p"
+    else if b then
+      if c then "q"
+      else "r"
+    else if d0 then "s"
+    else if d1 then "s"
+    else if d2 then "s"
+    else if d3 then "s"
+    else if d4 then "s"
+    else if d5 then "s"
+    else if d6 then "s"
+    else if d7 then "s"
+    else if d8 then "s"
+    else if d9 then "s"
+    else if d10 then "s"
+    else if d11 then "s"
+    else if d12 then "s"
+    else if d13 then "s"
+    else if d14 then "s"
+    else if d15 then "s"
+    else if d16 then "s"
+    else if d17 then "s"
+    else if d18 then "s"
+    else if d19 then "s"
+    else ""
+  def z = 1
+>>>
+object O:
+  def k(x: Int): String =
+    val f = 1
+    if a then "p"
+    else if b then
+      if c then "q"
+      else "r"
+    else if d0 then "s"
+    else if d1 then "s"
+    else if d2 then "s"
+    else if d3 then "s"
+    else if d4 then "s"
+    else if d5 then "s"
+    else if d6 then "s"
+    else if d7 then "s"
+    else if d8 then "s"
+    else if d9 then "s"
+    else if d10 then "s"
+    else if d11 then "s"
+    else if d12 then "s"
+    else if d13 then "s"
+    else if d14 then "s"
+    else if d15 then "s"
+    else if d16 then "s"
+    else if d17 then "s"
+    else if d18 then "s"
+    else if d19 then "s"
+    else ""
+    end if
+  end k
+  def z = 1
+end O
+
+<<< a long else gets one, counted from the else
+def f =
+  val x = 1
+  if x > 0 then
+    c0()
+    c1()
+    c2()
+    c3()
+    c4()
+    c5()
+    c6()
+    c7()
+    c8()
+    c9()
+    c10()
+    c11()
+    c12()
+    c13()
+    c14()
+    c15()
+    c16()
+    c17()
+    c18()
+    c19()
+  else
+    d()
+  if x > 1 then a()
+  else
+    e0()
+    e1()
+    e2()
+    e3()
+    e4()
+    e5()
+    e6()
+    e7()
+    e8()
+    e9()
+    e10()
+    e11()
+    e12()
+    e13()
+    e14()
+    e15()
+    e16()
+    e17()
+    e18()
+    e19()
+  x
+>>>
+def f =
+  val x = 1
+  if x > 0 then
+    c0()
+    c1()
+    c2()
+    c3()
+    c4()
+    c5()
+    c6()
+    c7()
+    c8()
+    c9()
+    c10()
+    c11()
+    c12()
+    c13()
+    c14()
+    c15()
+    c16()
+    c17()
+    c18()
+    c19()
+  else d()
+  if x > 1 then a()
+  else
+    e0()
+    e1()
+    e2()
+    e3()
+    e4()
+    e5()
+    e6()
+    e7()
+    e8()
+    e9()
+    e10()
+    e11()
+    e12()
+    e13()
+    e14()
+    e15()
+    e16()
+    e17()
+    e18()
+    e19()
+  end if
+  x
+end f
+
+<<< a short statement loses its marker
+object A:
+  def f =
+    a
+    b
+  end f
+
+  def g = 1
+end A
+>>>
+object A:
+  def f =
+    a
+    b
+
+  def g = 1
+
+<<< a long statement keeps its marker
+object A:
+  def f =
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  end f
+  def g = 1
+>>>
+object A:
+  def f =
+    a0()
+    a1()
+    a2()
+    a3()
+    a4()
+    a5()
+    a6()
+    a7()
+    a8()
+    a9()
+    a10()
+    a11()
+    a12()
+    a13()
+    a14()
+    a15()
+    a16()
+    a17()
+    a18()
+    a19()
+  end f
+  def g = 1
+end A
+
+<<< a marker after a comment stays, as the comment would leave the region
+object A:
+  def f =
+    a
+    b
+    // last
+  end f
+>>>
+object A:
+  def f =
+    a
+    b
+    // last
+  end f
+
+<<< a marker with a comment on its line stays
+object A:
+  def f =
+    a
+    b
+  end f // why
+>>>
+object A:
+  def f =
+    a
+    b
+  end f // why
+
+<<< a marker on a body of one expression stays, as scuff wouldn't add it
+object A:
+  def f =
+    if c then
+      a
+    else b
+  end f
+  def g = 1
+>>>
+object A:
+  def f =
+    if c then a
+    else b
+  end f
+  def g = 1
+
+<<< a short else if chain loses the marker tree-sitter-scala puts on its last if
+def f =
+  val x = 1
+  if a then b
+  else if c then
+    d
+    e
+  else g
+  end if
+  x
+>>>
+def f =
+  val x = 1
+  if a then b
+  else if c then
+    d
+    e
+  else g
+  x
+
+<<< a marker not at its statement's indentation stays
+object A:
+  def f =
+    a
+    b
+    end f
+  def g = 1
+>>>
+object A:
+  def f =
+    a
+    b
+    end f
+  def g = 1
+
+<<< the last inner statement's marker isn't its class's
+class Outer:
+  def m0 = 0
+  def m1 = 1
+  def m2 = 2
+  def m3 = 3
+  def m4 = 4
+  def m5 = 5
+  def m6 = 6
+  def m7 = 7
+  def m8 = 8
+  def m9 = 9
+  def m10 = 10
+  def m11 = 11
+  def m12 = 12
+  def m13 = 13
+  def m14 = 14
+  def m15 = 15
+  def m16 = 16
+  def m17 = 17
+  class Inner:
+    def a = 1
+    def b = 2
+  end Inner
+>>>
+class Outer:
+  def m0 = 0
+  def m1 = 1
+  def m2 = 2
+  def m3 = 3
+  def m4 = 4
+  def m5 = 5
+  def m6 = 6
+  def m7 = 7
+  def m8 = 8
+  def m9 = 9
+  def m10 = 10
+  def m11 = 11
+  def m12 = 12
+  def m13 = 13
+  def m14 = 14
+  def m15 = 15
+  def m16 = 16
+  def m17 = 17
+  class Inner:
+    def a = 1
+    def b = 2
+end Outer

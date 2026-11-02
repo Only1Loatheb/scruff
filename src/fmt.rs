@@ -4,6 +4,7 @@ use std::fmt;
 
 use crate::T;
 
+mod end_marker;
 mod indent;
 mod rewrite;
 mod spacing;
@@ -92,6 +93,9 @@ struct Style {
     /// Blank lines in a row, at most, anywhere else: in a block or a method
     /// body, including between nested functions.
     max_blank_lines_in_blocks: usize,
+    /// Line breaks, at least, in a statement that gets a Scala 3 end
+    /// marker, as `end f` after a long `def f =`. See [`end_marker`].
+    end_marker_min_breaks: usize,
 }
 
 /// After Black, the Python formatter, which allows 2 blank lines between
@@ -99,9 +103,14 @@ struct Style {
 /// the part of Python's modules. sbt's code agrees: its runs of 2 in blocks
 /// are all in comments or `format: off` blocks, which are copied as
 /// written.
+///
+/// End markers follow sbt's `rewrite.scala3.endMarker.insert.breaks.min =
+/// 20`. sbt doesn't remove them from short statements, and neither does
+/// scuff.
 const STYLE: Style = Style {
     max_blank_lines_in_templates: 2,
     max_blank_lines_in_blocks: 1,
+    end_marker_min_breaks: 20,
 };
 
 fn format_with(
@@ -153,28 +162,40 @@ fn format_once(
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let layout = indent::Layout::new(tree, &relaid_lists(tree, rules, style));
-    let reindented = !layout.is_empty();
-    let formatted = print(&build_doc(tree, rules, style, layout), &print_options);
-    if formatted == tree.syntax().text() {
-        return Ok((formatted, rewritten));
-    }
-    let formatted_tree = parse(&formatted);
-    match check_equivalent_trees(original, &formatted_tree) {
-        Ok(()) => Ok((formatted, Some(formatted_tree))),
-        // Where tree-sitter-scala reads the layout differently from scalac,
-        // moving lines can change the tree. Keep the indentation as written
-        // then, and the rest of the formatting.
-        Err(_) if reindented => {
-            let doc = build_doc(tree, rules, style, indent::Layout::default());
-            let formatted = print(&doc, &print_options);
-            let formatted_tree = parse(&formatted);
-            check_equivalent_trees(original, &formatted_tree)
-                .map_err(FormatError::NotEquivalent)?;
-            Ok((formatted, Some(formatted_tree)))
+    let relaid = relaid_lists(tree, rules, style);
+    let mut layout = Some(indent::Layout::new(tree, &relaid));
+    let reindented = layout.as_ref().is_some_and(|l| !l.is_empty());
+    let end_markers = options.dialect.significant_indentation;
+    // What to try, in order, until the result means the same. Where
+    // tree-sitter-scala reads the layout differently from scalac, moving
+    // lines can change the tree, and so can an end marker it attaches to
+    // something else. Then leave out end markers, or keep the indentation
+    // as written, keeping the rest of the formatting.
+    let tries = [(true, true), (true, false), (false, true), (false, false)]
+        .into_iter()
+        .filter(|&(reindent, markers)| (reindent || reindented) && (!markers || end_markers));
+    let mut difference = None;
+    for (reindent, markers) in tries {
+        let layout = if reindent {
+            layout
+                .take()
+                .unwrap_or_else(|| indent::Layout::new(tree, &relaid))
+        } else {
+            indent::Layout::default()
+        };
+        let doc = build_doc(tree, rules, style, layout, markers);
+        let formatted = print(&doc, &print_options);
+        if formatted == tree.syntax().text() {
+            return Ok((formatted, rewritten));
         }
-        Err(difference) => Err(FormatError::NotEquivalent(difference)),
+        let formatted_tree = parse(&formatted);
+        match check_equivalent_trees(original, &formatted_tree) {
+            Ok(()) => return Ok((formatted, Some(formatted_tree))),
+            Err(d) => difference = Some(d),
+        }
     }
+    let difference = difference.expect("one try at least");
+    Err(FormatError::NotEquivalent(difference))
 }
 
 /// The document for a parsed file, before printing.
@@ -185,6 +206,7 @@ pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
         Rules::Structural,
         STYLE,
         indent::Layout::new(tree, &relaid),
+        true,
     )
 }
 
@@ -195,7 +217,7 @@ fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextS
     if rules != Rules::Structural {
         return Vec::new();
     }
-    let formatter = Formatter::new(tree, rules, style, indent::Layout::default());
+    let formatter = Formatter::new(tree, rules, style, indent::Layout::default(), false);
     tree.syntax()
         .descendants()
         .filter_map(|node| formatter.list_parts(node))
@@ -208,8 +230,14 @@ fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextS
         .collect()
 }
 
-fn build_doc<'t>(tree: &'t Tree, rules: Rules, style: Style, layout: indent::Layout) -> Doc<'t> {
-    let mut formatter = Formatter::new(tree, rules, style, layout);
+fn build_doc<'t>(
+    tree: &'t Tree,
+    rules: Rules,
+    style: Style,
+    layout: indent::Layout,
+    end_markers: bool,
+) -> Doc<'t> {
+    let mut formatter = Formatter::new(tree, rules, style, layout, end_markers);
     let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
@@ -270,6 +298,15 @@ struct Formatter<'t> {
     /// What [`Formatter::prints_on_one_line`] found for each node, since
     /// rules ask it again for the nodes inside them.
     one_line: RefCell<HashMap<SyntaxNode<'t>, bool>>,
+    /// Whether long statements get an end marker: only where the dialect
+    /// has significant indentation.
+    end_markers: bool,
+    /// Where the last blocks start of the statements being marked,
+    /// innermost last, until `element` reaches them.
+    count_from: Vec<TextSize>,
+    /// End markers in the source that the printer stands in for, innermost
+    /// last, left out when reached.
+    dropped_markers: Vec<SyntaxNode<'t>>,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -295,7 +332,13 @@ enum Piece {
 }
 
 impl<'t> Formatter<'t> {
-    fn new(tree: &'t Tree, rules: Rules, style: Style, layout: indent::Layout) -> Formatter<'t> {
+    fn new(
+        tree: &'t Tree,
+        rules: Rules,
+        style: Style,
+        layout: indent::Layout,
+        end_markers: bool,
+    ) -> Formatter<'t> {
         Formatter {
             tree,
             rules,
@@ -318,6 +361,9 @@ impl<'t> Formatter<'t> {
                 .filter_map(|(i, _)| TextSize::try_from(i).ok())
                 .collect(),
             one_line: RefCell::default(),
+            end_markers,
+            count_from: Vec::new(),
+            dropped_markers: Vec::new(),
         }
     }
 
@@ -332,6 +378,89 @@ impl<'t> Formatter<'t> {
     }
 
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        if self.dropped_markers.last() == Some(&node) {
+            self.dropped_markers.pop();
+            return Doc::Nil;
+        }
+        // A statement that ends in a long indented region gets an end
+        // marker, if the printer finds it long. The leading trivia goes
+        // first, so the marker is counted and placed from the statement's
+        // own first line.
+        if let Some(marker) = self.end_marker(node) {
+            let leading = self.leading_of(node);
+            let min_breaks = self.style.end_marker_min_breaks;
+            // Counted from the last block, which `element` marks.
+            let (pending, dropping) = (self.count_from.len(), self.dropped_markers.len());
+            if let Some(at) = marker.last_block {
+                self.count_from.push(at);
+            }
+            // The printer prints it, if the statement is long.
+            if let Some(existing) = marker.existing {
+                self.dropped_markers.push(existing);
+            }
+            let body = self.node_unmarked(node);
+            self.count_from.truncate(pending);
+            self.dropped_markers.truncate(dropping);
+            return leading + body.end_marker(format!("end {}", marker.name), min_breaks);
+        }
+        self.node_unmarked(node)
+    }
+
+    /// The statement's end marker, if it may get one: see
+    /// [`end_marker`]. Not where it or the line break after it is copied
+    /// verbatim, nor with code after it on its line.
+    fn end_marker(&self, node: SyntaxNode<'t>) -> Option<end_marker::EndMarker<'t>> {
+        if !self.end_markers {
+            return None;
+        }
+        let marker = end_marker::end_marker(node)?;
+        let end = node.last_code_token()?.text_range().end();
+        let next = std::iter::successors(node.last_token()?.next_token(), SyntaxToken::next_token)
+            .find(SyntaxToken::owns_trivia);
+        let i = self.breaks.partition_point(|&o| o < end);
+        let line_break = self.breaks.get(i).copied();
+        let free_after = match (next, line_break) {
+            (Some(next), Some(at)) if at < next.text_range().start() => self.is_free(at),
+            // At the end of the file, which ends in a line break anyway.
+            (None, at) => at.is_none_or(|at| self.is_free(at)) && self.is_free(end),
+            _ => false,
+        };
+        // A marker the printer stands in for is free, and where the
+        // printer would put it: on a line of its own, at the indentation
+        // of the statement's first line.
+        let existing_free = marker.existing.is_none_or(|m| {
+            let at = m.text_range().start();
+            let first = node.tokens().find(SyntaxToken::owns_trivia);
+            // Its line break and indentation too, which go with it.
+            let previous = m.first_token().and_then(|t| t.prev_token());
+            let before = std::iter::successors(previous, SyntaxToken::prev_token)
+                .find(SyntaxToken::owns_trivia)
+                .map_or(at, |t| t.text_range().end());
+            self.gap_is_free(TextRange::new(before, at))
+                && self.is_free(at)
+                && first.is_some_and(|first| {
+                    let before = &self.text[self.line_start(at)..usize::from(at)];
+                    before.trim().is_empty()
+                        && before == self.indentation_at(first.text_range().start())
+                })
+        });
+        (free_after && existing_free && self.is_free(node.text_range().start())).then_some(marker)
+    }
+
+    /// Where the line with `offset` starts.
+    fn line_start(&self, offset: TextSize) -> usize {
+        self.text[..usize::from(offset)]
+            .rfind(['\n', '\r'])
+            .map_or(0, |i| i + 1)
+    }
+
+    /// The spaces and tabs that start the line with `offset`.
+    fn indentation_at(&self, offset: TextSize) -> &'t str {
+        let line = &self.text[self.line_start(offset)..];
+        &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
+    }
+
+    fn node_unmarked(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         // A body that may join its keyword's line: laid out as ever if it
         // breaks, with the line break before it a space if it fits.
         if let Some(first) = self.joinable_body(node) {
@@ -536,6 +665,11 @@ impl<'t> Formatter<'t> {
     fn leading_of_element(&mut self, element: &SyntaxElement<'t>) -> Doc<'t> {
         match element {
             NodeOrToken::Node(node) => self.leading_of(*node),
+            // A rule around this one, such as an end marker's, already
+            // printed it.
+            NodeOrToken::Token(token) if self.leading_done == Some(token.text_range().start()) => {
+                Doc::Nil
+            }
             NodeOrToken::Token(token) => {
                 let doc = self.leading(*token);
                 self.leading_done = Some(token.text_range().start());
@@ -1226,9 +1360,22 @@ impl<'t> Formatter<'t> {
     }
 
     fn element(&mut self, element: SyntaxElement<'t>) -> Doc<'t> {
-        match element {
+        // The start of a marked statement's last block, before its leading
+        // line break: where its end marker starts counting.
+        let count_from = self.count_from.last().is_some_and(|&at| {
+            first_code_token(&element).is_some_and(|t| t.text_range().start() == at)
+        });
+        if count_from {
+            self.count_from.pop();
+        }
+        let doc = match element {
             NodeOrToken::Node(node) => self.node(node),
             NodeOrToken::Token(token) => self.token(token),
+        };
+        if count_from {
+            Doc::count_from() + doc
+        } else {
+            doc
         }
     }
 
@@ -1802,6 +1949,7 @@ mod tests {
             let style = Style {
                 max_blank_lines_in_templates: templates,
                 max_blank_lines_in_blocks: blocks,
+                ..STYLE
             };
             format_with(source, &options, Rules::Structural, style).unwrap()
         };
