@@ -1,0 +1,53 @@
+# `implicit` parameter clauses as `using` ones where the dialect allows
+# them. The dialect is Scala 3 unless a case names another.
+
+<<< methods and constructors
+def f(x: Int)(implicit ec: ExecutionContext): Future[Int] = Future(x)
+def g(implicit  ord: Ordering[A], num: Numeric[A]): A
+class C(x: Int)(implicit ec: ExecutionContext) {
+  def this()(implicit ec: ExecutionContext) = this(1)
+}
+>>>
+def f(x: Int)(using ec: ExecutionContext): Future[Int] = Future(x)
+def g(using ord: Ordering[A], num: Numeric[A]): A
+class C(x: Int)(using ec: ExecutionContext):
+  def this()(using ec: ExecutionContext) = this(1)
+
+<<< a comment stays
+def f(implicit /* the pool */ ec: ExecutionContext) = 1
+>>>
+def f(using /* the pool */ ec: ExecutionContext) = 1
+
+<<< class parameters that are members stay implicit
+class C(implicit val ec: ExecutionContext)
+class D(implicit private val ec: ExecutionContext)
+>>>
+class C(implicit val ec: ExecutionContext)
+class D(implicit private val ec: ExecutionContext)
+
+<<< broken over lines
+def f(
+    x: Int
+)(implicit
+    ec: ExecutionContext,
+    ord: Ordering[Int]
+): Int = x
+>>>
+def f(x: Int)(using
+    ec: ExecutionContext,
+    ord: Ordering[Int]
+): Int = x
+
+<<< Scala 2 with -Xsource:3 keeps `implicit`
+dialect = scala213source3
+===
+def f(implicit ec: ExecutionContext) = 1
+>>>
+def f(implicit ec: ExecutionContext) = 1
+
+<<< `using` stays in Scala 2
+dialect = scala213
+===
+def f(using ec: ExecutionContext) = 1
+>>>
+def f(using ec: ExecutionContext) = 1

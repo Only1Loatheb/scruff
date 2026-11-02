@@ -25,6 +25,9 @@
 //! means the same as a colon argument: `xs.map { x => a }` as `xs.map: x =>`
 //! with `a` indented below. An end marker, as `end f` after `def f =`, may
 //! be added or removed where it names what it ends: it means nothing.
+//! And an `implicit` parameter clause means the same as a `using` one, as
+//! `def f(implicit ec: EC)` as `def f(using ec: EC)`, unless a class
+//! parameter in it is a `val` or `var` or has modifiers.
 
 use std::fmt;
 
@@ -134,6 +137,9 @@ fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
     if is_type_wildcard_token(token) {
         return (None, "?");
     }
+    if is_implicit_clause_keyword(token) {
+        return (None, "using");
+    }
     let parent = token.parent().map(|p| p.kind());
     match (parent, token.text()) {
         (Some(SyntaxKind::NamespaceWildcard), "_") => (None, "*"),
@@ -141,6 +147,29 @@ fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
         (Some(SyntaxKind::NamespaceWildcard), "*")
         | (Some(SyntaxKind::AsRenamedIdentifier), "as") => (None, token.text()),
         (_, text) => (Some(token.kind()), text),
+    }
+}
+
+/// Whether `token` is the `implicit` or `using` that starts a parameter
+/// clause, where one means the same as the other: not where a class
+/// parameter is a `val` or `var` or has modifiers, since a `using` one is a
+/// `given` member, which `import a.*` leaves out.
+pub(crate) fn is_implicit_clause_keyword(token: &SyntaxToken<'_>) -> bool {
+    if !matches!(token.text(), "implicit" | "using") {
+        return false;
+    }
+    let Some(clause) = token.parent() else {
+        return false;
+    };
+    match clause.kind() {
+        SyntaxKind::Parameters => true,
+        SyntaxKind::ClassParameters => !clause.children().any(|parameter| {
+            parameter.children_with_tokens().any(|part| match part {
+                NodeOrToken::Node(node) => node.kind() == SyntaxKind::Modifiers,
+                NodeOrToken::Token(token) => matches!(token.text(), "val" | "var"),
+            })
+        }),
+        _ => false,
     }
 }
 
@@ -758,6 +787,23 @@ mod tests {
             "x match { case Seq(xs @ y*) => }\n",
             "x match { case Seq(xs*) => }\n",
         );
+    }
+
+    #[test]
+    fn using_clauses_mean_implicit_ones() {
+        let old = "def f(x: A)(implicit /* c */ ec: EC, b: B) = 1\nclass C(implicit d: D)\n";
+        let new = "def f(x: A)(using /* c */ ec: EC, b: B) = 1\nclass C(using d: D)\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // A `using` class parameter that is a member is a `given` one.
+        differs("class C(implicit val d: D)\n", "class C(using val d: D)\n");
+        differs(
+            "class C(implicit private val d: D)\n",
+            "class C(using private val d: D)\n",
+        );
+        // Only the keyword.
+        differs("def f(implicit ec: EC) = 1\n", "def f(using ed: EC) = 1\n");
+        differs("def f(ec: EC) = 1\n", "def f(using ec: EC) = 1\n");
     }
 
     #[test]

@@ -15,6 +15,13 @@
 //! `for x <- xs do f(x)`, and back. `for` braces stay; back in Scala 2, a
 //! `for` written over several lines gets them.
 //!
+//! An `implicit` parameter clause becomes a `using` one: `def f(implicit
+//! ec: EC)` becomes `def f(using ec: EC)`, where the dialect allows it. Not
+//! where a class parameter is a `val` or `var` or has modifiers: there,
+//! `using` would make it a `given`, which `import a.*` doesn't import. And
+//! not back: `using EC`, without a name, has no Scala 2 form. Callers that
+//! pass the argument explicitly must then write `f(using ec)`.
+//!
 //! Only tokens change; comments and whitespace stay where they are, and
 //! code copied verbatim, such as `format: off` blocks, is left alone.
 //! `check_equivalent` treats each old form and its new one as the same.
@@ -22,7 +29,7 @@
 use crate::config::Dialect;
 use crate::lossless_tree::{
     NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Tree,
-    check_equivalent_trees, is_type_wildcard_place, parse,
+    check_equivalent_trees, is_implicit_clause_keyword, is_type_wildcard_place, parse,
 };
 
 /// A rewrite tree-sitter-scala reads as the same code.
@@ -205,6 +212,13 @@ fn edits_for(
                     let joins = text[end..].chars().next().is_some_and(is_operator_char);
                     let mark = if joins { "? " } else { "?" };
                     edits.push((token.text_range(), mark.to_string()));
+                }
+            }
+            SyntaxKind::Parameters | SyntaxKind::ClassParameters if dialect.given_using => {
+                for token in tokens().filter(|t| t.text() == "implicit") {
+                    if is_implicit_clause_keyword(&token) {
+                        edits.push((token.text_range(), "using".to_string()));
+                    }
                 }
             }
             SyntaxKind::Vararg | SyntaxKind::RepeatPattern => {
@@ -1231,6 +1245,7 @@ mod tests {
         quiet_syntax: false,
         significant_indentation: false,
         fewer_braces: false,
+        given_using: false,
     };
 
     /// The rewritten text, if anything changed.
@@ -1273,6 +1288,42 @@ mod tests {
         ] {
             assert_eq!(changed(source, NEW), None, "{source}");
         }
+    }
+
+    #[test]
+    fn implicit_clauses_become_using_ones() {
+        assert_eq!(
+            rewritten("def f(x: A)(implicit ec: EC, b: B): C = c\n", NEW),
+            "def f(x: A)(using ec: EC, b: B): C = c\n"
+        );
+        assert_eq!(
+            rewritten("def f(implicit ec: EC): C\n", NEW),
+            "def f(using ec: EC): C\n"
+        );
+        assert_eq!(
+            rewritten("class C(x: A)(implicit ec: EC)\n", NEW),
+            "class C(x: A)(using ec: EC)\n"
+        );
+        assert_eq!(
+            rewritten("def this(x: A)(implicit ec: EC) = this()\n", NEW),
+            "def this(x: A)(using ec: EC) = this()\n"
+        );
+        assert_eq!(
+            rewritten("def f(implicit /* c */ ec: EC) = 1\n", NEW),
+            "def f(using /* c */ ec: EC) = 1\n"
+        );
+        for source in [
+            "class C(implicit val ec: EC)\n",
+            "class C(implicit var ec: EC)\n",
+            "class C(implicit private val ec: EC)\n",
+            "def f(using ec: EC) = 1\n",
+        ] {
+            assert_eq!(changed(source, NEW), None, "{source}");
+        }
+        // Not in Scala 2, and not back.
+        let source3 = Dialect::named("scala213source3").unwrap();
+        assert_eq!(changed("def f(implicit ec: EC) = 1\n", source3), None);
+        assert_eq!(changed("def f(using ec: EC) = 1\n", OLD), None);
     }
 
     #[test]

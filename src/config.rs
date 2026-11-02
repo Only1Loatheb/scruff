@@ -31,7 +31,8 @@
 //!   `allowSignificantIndentation`, also under `fileOverride`, whose
 //!   patterns are tried longest first, as in scalafmt. The dialect is
 //!   `scala3` when none is named. Fewer braces go with significant
-//!   indentation; `allowFewerBraces` isn't read.
+//!   indentation; `allowFewerBraces` isn't read. `using` clauses go with
+//!   the dialect's name, `scala3`; `allowGivenUsing` isn't read.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -89,6 +90,9 @@ pub struct Dialect {
     /// indented below for `xs.map { x =>`. Only Scala 3's, since 3.3, and
     /// only with significant indentation, which a colon argument is.
     pub fewer_braces: bool,
+    /// A `using` clause for an `implicit` one: `def f(using ec: EC)` for
+    /// `def f(implicit ec: EC)`. Only Scala 3's.
+    pub given_using: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -110,6 +114,7 @@ impl Dialect {
         quiet_syntax: true,
         significant_indentation: true,
         fewer_braces: true,
+        given_using: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -132,6 +137,7 @@ impl Dialect {
             quiet_syntax: scala3,
             significant_indentation: scala3,
             fewer_braces: scala3,
+            given_using: scala3,
         })
     }
 }
@@ -869,6 +875,7 @@ mod tests {
             quiet_syntax: true,
             significant_indentation: true,
             fewer_braces: true,
+            given_using: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -878,11 +885,13 @@ mod tests {
             quiet_syntax: false,
             significant_indentation: false,
             fewer_braces: false,
+            given_using: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
             significant_indentation: false,
             fewer_braces: false,
+            given_using: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
@@ -906,6 +915,12 @@ mod tests {
         );
         // `allowFewerBraces` isn't read; fewer braces go with significant
         // indentation.
+        // `allowGivenUsing` isn't read; `using` goes with the dialect.
+        let using = |text: &str| config(text).dialect_for(None).given_using;
+        assert!(using("runner.dialectOverride.allowGivenUsing = false"));
+        assert!(!using(
+            "runner.dialect = scala213source3\nrunner.dialectOverride.allowGivenUsing = true"
+        ));
         let fewer = |text: &str| config(text).dialect_for(None).fewer_braces;
         assert!(fewer("runner.dialectOverride.allowFewerBraces = false"));
         assert!(!fewer(
@@ -998,6 +1013,7 @@ mod tests {
             // cats turns significant indentation off.
             let scala3 = Dialect {
                 quiet_syntax: true,
+                given_using: true,
                 ..main
             };
             assert_eq!(dialect("core/src/test/scala-3/cats/A.scala"), scala3);

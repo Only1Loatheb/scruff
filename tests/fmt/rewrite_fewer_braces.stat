@@ -90,7 +90,7 @@ trait MapInstances {
 }
 >>>
 trait MapInstances:
-  implicit def catsStdShowForMap[A, B](implicit showA: Show[A], showB: Show[B]): Show[Map[A, B]] =
+  implicit def catsStdShowForMap[A, B](using showA: Show[A], showB: Show[B]): Show[Map[A, B]] =
     _.iterator
       .map:
         case (a, b) => showA.show(a) + " -> " + showB.show(b)
