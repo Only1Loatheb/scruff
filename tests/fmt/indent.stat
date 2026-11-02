@@ -25,17 +25,15 @@ object A:
 
 <<< continuation lines keep their shape
 object A {
-    val x = f(
-        a,
-        b
-    )
+    val x = a +
+        b +
+          c
 }
 >>>
 object A {
-  val x = f(
-      a,
-      b
-  )
+  val x = a +
+      b +
+        c
 }
 
 <<< a body is indented from the first line of its definition

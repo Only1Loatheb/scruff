@@ -26,15 +26,15 @@ val s = f(  "a  b" ,  s"${ x }  y" )
 val s = f("a  b", s"${ x }  y")
 
 <<< line breaks and indentation are kept
-def f(
-    a:Int,
-      b:Int) =
-  a+b
+def f(a:Int, b:Int) =
+  a+
+      b-
+    c
 >>>
-def f(
-    a: Int,
-      b: Int) =
-  a + b
+def f(a: Int, b: Int) =
+  a +
+      b -
+    c
 
 <<< a name ending in an underscore keeps its space before an operator
 val op_ : Int = 1

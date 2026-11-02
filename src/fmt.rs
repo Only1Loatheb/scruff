@@ -102,14 +102,14 @@ fn format_with(
     if !tree.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
     }
+    let width = options.max_width;
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let reindent = indent::Reindent::new(&tree);
+    let reindent = indent::Reindent::new(&tree, &relaid_lists(&tree, rules, style, width));
     let reindented = !reindent.is_empty();
-    let width = options.max_width;
     let formatted = print(
         &build_doc(&tree, rules, style, width, reindent),
         &print_options,
@@ -136,8 +136,41 @@ pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
         Rules::Structural,
         STYLE,
         FormatOptions::default().max_width,
-        indent::Reindent::new(tree),
+        indent::Reindent::new(
+            tree,
+            &relaid_lists(
+                tree,
+                Rules::Structural,
+                STYLE,
+                FormatOptions::default().max_width,
+            ),
+        ),
     )
+}
+
+/// Where the lists are, as `(` and `)` offsets, that the list rule lays
+/// out itself, for [`indent::Reindent`]: what follows the `)` goes on the
+/// line of the `(`, whether the list is joined or broken.
+fn relaid_lists(
+    tree: &Tree,
+    rules: Rules,
+    style: Style,
+    max_width: usize,
+) -> Vec<(TextSize, TextSize)> {
+    if rules != Rules::Structural {
+        return Vec::new();
+    }
+    let formatter = Formatter::new(tree, rules, style, max_width, indent::Reindent::default());
+    tree.syntax()
+        .descendants()
+        .filter_map(|node| formatter.list_parts(node))
+        .map(|parts| {
+            (
+                parts.open.text_range().start(),
+                parts.close.text_range().start(),
+            )
+        })
+        .collect()
 }
 
 fn build_doc<'t>(
@@ -147,21 +180,7 @@ fn build_doc<'t>(
     max_width: usize,
     reindent: indent::Reindent,
 ) -> Doc<'t> {
-    let mut formatter = Formatter {
-        tree,
-        rules,
-        max_width,
-        text: tree.syntax().text(),
-        verbatim: tree.verbatim_ranges(),
-        next_verbatim: 0,
-        copied_until: TextSize::from(0),
-        leading_done: None,
-        trailing_skipped: Vec::new(),
-        reindent,
-        at_file_start: true,
-        line_breaks: 0,
-        style,
-    };
+    let mut formatter = Formatter::new(tree, rules, style, max_width, reindent);
     let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
@@ -239,6 +258,30 @@ enum Piece {
 }
 
 impl<'t> Formatter<'t> {
+    fn new(
+        tree: &'t Tree,
+        rules: Rules,
+        style: Style,
+        max_width: usize,
+        reindent: indent::Reindent,
+    ) -> Formatter<'t> {
+        Formatter {
+            tree,
+            rules,
+            max_width,
+            text: tree.syntax().text(),
+            verbatim: tree.verbatim_ranges(),
+            next_verbatim: 0,
+            copied_until: TextSize::from(0),
+            leading_done: None,
+            trailing_skipped: Vec::new(),
+            reindent,
+            at_file_start: true,
+            line_breaks: 0,
+            style,
+        }
+    }
+
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         // Alignment is layout, like indentation, so the fallback has it too.
         if matches!(
@@ -277,55 +320,17 @@ impl<'t> Formatter<'t> {
 
     /// A list in parentheses or brackets, such as arguments, parameters, or
     /// type arguments and parameters: on one line if it fits, otherwise one
-    /// item per line, nested `levels` deep, with `)` or `]` on its own line
-    /// (scalafmt's `danglingParentheses`).
-    ///
-    /// Only for a list written on one line with no comments. A list over
-    /// several lines keeps its line breaks until indentation is handled.
+    /// item per line, nested `levels` deep, with a trailing comma after
+    /// several items and `)` or `]` on its own line (scalafmt's
+    /// `danglingParentheses`).
     fn list(&mut self, node: SyntaxNode<'t>, levels: usize) -> Option<Doc<'t>> {
-        if !self.can_break(node) {
-            return None;
-        }
-        let children: Vec<_> = node.non_trivia_children().collect();
-        let (NodeOrToken::Token(open), NodeOrToken::Token(close)) =
-            (children.first()?, children.last()?)
-        else {
-            return None;
-        };
-        if !matches!((open.text(), close.text()), ("(", ")") | ("[", "]")) || children.len() < 3 {
-            return None;
-        }
-
-        // The items between `(` and `)`, split at commas.
-        let mut items = vec![Vec::new()];
-        let mut commas = Vec::new();
-        for child in &children[1..children.len() - 1] {
-            match child {
-                NodeOrToken::Token(t) if t.text() == "," => {
-                    commas.push(*t);
-                    items.push(Vec::new());
-                }
-                _ => items.last_mut().unwrap().push(*child),
-            }
-        }
-        // Empty items: a trailing comma, which needs `)` on the next line.
-        if items.iter().any(Vec::is_empty) {
-            return None;
-        }
-        // The gaps that become line breaks must be ones the spacing rules
-        // decide, so the list printed flat matches the fallback.
-        let first = std::iter::successors(open.next_token(), SyntaxToken::next_token)
-            .find(|t| !t.is_trivia())?;
-        if self.rule_between(open, &first) != Some(false) {
-            return None;
-        }
-        for comma in &commas {
-            let next = std::iter::successors(comma.next_token(), SyntaxToken::next_token)
-                .find(|t| !t.is_trivia())?;
-            if self.rule_between(comma, &next) != Some(true) {
-                return None;
-            }
-        }
+        let ListParts {
+            open,
+            close,
+            items,
+            commas,
+        } = self.list_parts(node)?;
+        let (open, close) = (&open, &close);
 
         // A lambda alone in the arguments keeps its head with the `(` and
         // breaks before its body instead, as in sbt's code: `f(x =>`, the
@@ -341,9 +346,12 @@ impl<'t> Formatter<'t> {
         };
         if let Some((head, arrow, body)) = lambda {
             let open = self.token_without_trailing(*open);
+            self.skip_leading(&head[0]);
             let mut docs: Vec<_> = head.into_iter().map(|e| self.element(e)).collect();
             docs.push(self.token_without_trailing(arrow));
+            self.skip_leading(&body);
             let body = (Doc::line() + self.element(body)).nest();
+            self.skip_leading(&NodeOrToken::Token(*close));
             let close_text = self.token_without_trailing(*close);
             let close_trailing = self.trailing(*close);
             return Some(
@@ -357,20 +365,29 @@ impl<'t> Formatter<'t> {
         let open = self.token_without_trailing(*open);
         let mut inner = vec![Doc::softline()];
         let mut commas = commas.into_iter();
+        let several = items.len() > 1;
         for (i, item) in items.into_iter().enumerate() {
             if i > 0 {
                 let comma = commas.next().unwrap();
+                self.skip_leading(&NodeOrToken::Token(comma));
                 inner.push(self.token_without_trailing(comma));
                 inner.push(Doc::line());
             }
+            self.skip_leading(&item[0]);
             for element in item {
                 inner.push(self.element(element));
             }
+        }
+        // A trailing comma when broken, whether or not the source has one,
+        // unless there's only one item.
+        if several {
+            inner.push(Doc::if_break(Doc::text(","), Doc::Nil));
         }
         let mut inner = Doc::concat(inner);
         for _ in 0..levels {
             inner = inner.nest();
         }
+        self.skip_leading(&NodeOrToken::Token(*close));
         let close_text = self.token_without_trailing(*close);
         let close_trailing = self.trailing(*close);
         Some(
@@ -552,13 +569,149 @@ impl<'t> Formatter<'t> {
         )
     }
 
-    /// Whether a rule may add line breaks inside `node`: it's written on one
-    /// line, has no comments inside, and starts a line of code, since broken
-    /// lines are indented from that line's indentation. Nodes over several
-    /// lines keep their breaks until indentation is handled.
+    /// The parts of a list the [`Self::list`] rule lays out, or `None` if it
+    /// keeps the list as written: it has comments, an item that doesn't
+    /// print on one line, or a gap where the spacing rules don't decide the
+    /// space, so the list printed flat wouldn't match the fallback.
+    fn list_parts(&self, node: SyntaxNode<'t>) -> Option<ListParts<'t>> {
+        if !matches!(
+            node.kind(),
+            SyntaxKind::Arguments
+                | SyntaxKind::Parameters
+                | SyntaxKind::ClassParameters
+                | SyntaxKind::TypeArguments
+                | SyntaxKind::TypeParameters
+        ) || !self.can_relayout(node)
+        {
+            return None;
+        }
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let (NodeOrToken::Token(open), NodeOrToken::Token(close)) =
+            (children.first()?, children.last()?)
+        else {
+            return None;
+        };
+        if !matches!((open.text(), close.text()), ("(", ")") | ("[", "]")) || children.len() < 3 {
+            return None;
+        }
+
+        // The items between `(` and `)`, split at commas.
+        let mut items = vec![Vec::new()];
+        let mut commas = Vec::new();
+        for child in &children[1..children.len() - 1] {
+            match child {
+                NodeOrToken::Token(t) if t.text() == "," => {
+                    commas.push(*t);
+                    items.push(Vec::new());
+                }
+                _ => items.last_mut().unwrap().push(*child),
+            }
+        }
+        // A trailing comma, which needs `)` on the next line, leaves the last
+        // item empty.
+        let trailing_comma = items.len() > 1 && items.last().is_some_and(Vec::is_empty);
+        if trailing_comma {
+            items.pop();
+            // One before `)` on the same line is an error the rule mustn't fix.
+            if !close
+                .leading_trivia()
+                .any(|t| t.kind() == TriviaKind::Newline)
+            {
+                return None;
+            }
+        }
+        if items.iter().any(Vec::is_empty) {
+            return None;
+        }
+        // Line breaks between items go, but not ones inside an item.
+        if !items.iter().all(|item| self.items_on_one_line(item)) {
+            return None;
+        }
+        let first = std::iter::successors(open.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())?;
+        if self.rule_between(open, &first) != Some(false) {
+            return None;
+        }
+        for (i, comma) in commas.iter().enumerate() {
+            let prev = std::iter::successors(comma.prev_token(), SyntaxToken::prev_token)
+                .find(|t| !t.is_trivia())?;
+            if self.rule_between(&prev, comma) != Some(false) {
+                return None;
+            }
+            if i + 1 == items.len() {
+                break;
+            }
+            let next = std::iter::successors(comma.next_token(), SyntaxToken::next_token)
+                .find(|t| !t.is_trivia())?;
+            if self.rule_between(comma, &next) != Some(true) {
+                return None;
+            }
+        }
+        let last = std::iter::successors(close.prev_token(), SyntaxToken::prev_token)
+            .find(|t| !t.is_trivia())?;
+        // After a trailing comma, `)` goes on the next line anyway.
+        let gap = TextRange::new(last.text_range().end(), close.text_range().start());
+        if !trailing_comma && self.rule_between(&last, close) != Some(false)
+            || !self.gap_is_free(gap)
+        {
+            return None;
+        }
+        // The source's trailing comma isn't printed: the rule adds its own.
+        commas.truncate(items.len() - 1);
+        Some(ListParts {
+            open: *open,
+            close: *close,
+            items,
+            commas,
+        })
+    }
+
+    /// Whether the element prints on one line, unless a rule breaks it to
+    /// fit: it's written on one line, or its line breaks are all between
+    /// the items of lists that [`Self::list`] joins. Rules that decide on
+    /// one-line code ask this rather than look at the source, so the first
+    /// run decides as the second, on its output, would.
+    fn prints_on_one_line(&self, element: &SyntaxElement<'t>) -> bool {
+        if !element.text().contains(['\n', '\r']) {
+            return true;
+        }
+        let NodeOrToken::Node(node) = element else {
+            return false;
+        };
+        if self.rules == Rules::Structural && self.list_parts(*node).is_some() {
+            return true;
+        }
+        let children: Vec<_> = node.non_trivia_children().collect();
+        self.items_on_one_line(&children)
+    }
+
+    /// Whether the elements, in a row, print on one line: each does, and
+    /// there are no line breaks between them.
+    fn items_on_one_line(&self, elements: &[SyntaxElement<'t>]) -> bool {
+        // Between tokens: a node's range can take in trivia after its last
+        // token, as `enumerators` does the line break before `yield`.
+        elements.windows(2).all(|pair| {
+            let (Some(left), Some(right)) = (last_code_token(&pair[0]), first_code_token(&pair[1]))
+            else {
+                return false;
+            };
+            let gap = TextRange::new(left.text_range().end(), right.text_range().start());
+            !self.text[gap].contains(['\n', '\r'])
+        }) && elements.iter().all(|e| self.prints_on_one_line(e))
+    }
+
+    /// Whether a rule may add line breaks inside `node`: it prints on one
+    /// line and [`Self::can_relayout`] allows it.
     fn can_break(&self, node: SyntaxNode<'t>) -> bool {
+        self.prints_on_one_line(&NodeOrToken::Node(node)) && self.can_relayout(node)
+    }
+
+    /// Whether a rule may decide where `node` has line breaks: it has no
+    /// comments inside, and starts a line of code, since broken lines are
+    /// indented from that line's indentation.
+    fn can_relayout(&self, node: SyntaxNode<'t>) -> bool {
         let range = node.text_range();
-        if node.text().contains(['\n', '\r']) || !self.free_at(range.start()) {
+        if !self.free_at(range.start()) {
             return false;
         }
         let line_start = self.text[..usize::from(range.start())]
@@ -776,6 +929,20 @@ impl<'t> Formatter<'t> {
         let leading: Vec<_> = token.leading_trivia().collect();
         self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
         Doc::concat(docs)
+    }
+
+    /// Drops the leading trivia of the element's first token: the line
+    /// breaks and indentation before it, which a rule replaces with its own.
+    /// The trivia must have no comments.
+    fn skip_leading(&mut self, element: &SyntaxElement<'t>) {
+        let first = match element {
+            NodeOrToken::Token(t) => Some(*t),
+            NodeOrToken::Node(n) => std::iter::successors(n.first_token(), SyntaxToken::next_token)
+                .find(|t| !t.is_trivia()),
+        };
+        if let Some(first) = first {
+            self.leading_done = Some(first.text_range().start());
+        }
     }
 
     /// The leading trivia of the node's first token, printed now so that a
@@ -1051,6 +1218,16 @@ impl<'t> Formatter<'t> {
     }
 }
 
+/// A list split for [`Formatter::list`].
+struct ListParts<'t> {
+    open: SyntaxToken<'t>,
+    close: SyntaxToken<'t>,
+    /// The items between the commas, each a run of elements.
+    items: Vec<Vec<SyntaxElement<'t>>>,
+    /// The commas between the items, without a trailing one.
+    commas: Vec<SyntaxToken<'t>>,
+}
+
 /// A child of a `case` clause list, rendered.
 enum Part<'t> {
     Clause(ClauseParts<'t>),
@@ -1107,6 +1284,17 @@ fn first_code_token<'t>(element: &SyntaxElement<'t>) -> Option<SyntaxToken<'t>> 
     match element {
         NodeOrToken::Token(token) => Some(*token).filter(|t| !t.is_trivia() && !t.is_missing()),
         NodeOrToken::Node(node) => node.tokens().find(|t| !t.is_trivia() && !t.is_missing()),
+    }
+}
+
+/// The last token of an element that isn't trivia or missing.
+fn last_code_token<'t>(element: &SyntaxElement<'t>) -> Option<SyntaxToken<'t>> {
+    match element {
+        NodeOrToken::Token(token) => Some(*token).filter(|t| !t.is_trivia() && !t.is_missing()),
+        NodeOrToken::Node(node) => node
+            .tokens()
+            .filter(|t| !t.is_trivia() && !t.is_missing())
+            .last(),
     }
 }
 
@@ -1309,8 +1497,7 @@ mod tests {
     }
 
     /// Formats every error-free file in the corpus, checking that each
-    /// result is equivalent, never joins lines with code (rules only add
-    /// line breaks so far), and is stable when formatted again. Run with:
+    /// result is equivalent and is stable when formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
@@ -1326,8 +1513,8 @@ mod tests {
         let files = crate::lossless_tree::corpus::corpus_files();
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
-        let (mut broken, mut lines_added) = (0, 0);
-        // Lines with code or comments: rules add them but never join them.
+        let (mut broken, mut lines_added, mut joined, mut lines_removed) = (0, 0, 0, 0);
+        // Lines with code or comments.
         let lines = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).count();
         for path in &files {
             let Ok(source) = std::fs::read_to_string(path) else {
@@ -1349,9 +1536,10 @@ mod tests {
                         lines_added += lines(&out) - lines(&source);
                     }
                     if lines(&out) < lines(&source) {
-                        failures.push(format!("{}: joined lines", path.display()));
-                    } else if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str())
-                    {
+                        joined += 1;
+                        lines_removed += lines(&source) - lines(&out);
+                    }
+                    if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str()) {
                         failures.push(format!("{}: not idempotent", path.display()));
                     }
                 }
@@ -1361,7 +1549,7 @@ mod tests {
             println!("{failure}");
         }
         println!(
-            "{} files: {formatted} formatted ({changed} changed, {broken} with {lines_added} lines added), {skipped} skipped for syntax errors, {refused} known refusals, {} failed",
+            "{} files: {formatted} formatted ({changed} changed, {broken} with {lines_added} lines added, {joined} with {lines_removed} lines removed), {skipped} skipped for syntax errors, {refused} known refusals, {} failed",
             files.len(),
             failures.len()
         );
@@ -1370,11 +1558,14 @@ mod tests {
 
     /// Formats `source` with structural rules and with only the fallback,
     /// at a width where nothing needs to break, describing the first
-    /// difference, if any.
+    /// difference, if any. Lists written over several lines are joined
+    /// first, since the fallback keeps the source's line breaks.
     fn rules_disagree(source: &str) -> Option<String> {
         let options = FormatOptions {
             max_width: 1_000_000,
         };
+        let joined = format_with(source, &options, Rules::Structural, STYLE);
+        let source = joined.as_deref().unwrap_or(source);
         let structural = format_with(source, &options, Rules::Structural, STYLE);
         let fallback = format_with(source, &options, Rules::Fallback, STYLE);
         if structural == fallback {

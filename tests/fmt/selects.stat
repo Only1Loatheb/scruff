@@ -54,7 +54,7 @@ val ys = Generator.string(alpha, beta, gamma1)
 val ys = Generator.string(
   alpha,
   beta,
-  gamma1
+  gamma1,
 )
 
 <<< a block argument in a chain

@@ -10,12 +10,15 @@
 //!    into a different block by re-indenting.
 //! 3. They have the same comments, in the same order, each attached to the
 //!    same token in the same position (leading, trailing, or end of file).
+//!
+//! A trailing comma, one followed by a line break and then `)` or `]`, may
+//! be added or removed: it means nothing.
 
 use std::fmt;
 
 use super::{
-    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, Tree, WalkEvent,
-    parse,
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, Tree, TriviaKind,
+    WalkEvent, parse,
 };
 
 /// The first way two texts differ.
@@ -160,6 +163,7 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
         }
         WalkEvent::Enter(NodeOrToken::Node(node)) => Some(Step::Enter(node)),
         WalkEvent::Leave(NodeOrToken::Node(node)) => Some(Step::Leave(node)),
+        WalkEvent::Enter(NodeOrToken::Token(token)) if is_trailing_comma(&token) => None,
         WalkEvent::Enter(NodeOrToken::Token(token)) => Some(Step::Token(token)),
         WalkEvent::Leave(NodeOrToken::Token(_)) => None,
     })
@@ -185,6 +189,29 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
         }
         _ => false,
     }
+}
+
+/// A comma that may come or go: followed by a line break and then `)` or
+/// `]`, with no comments to keep with it.
+fn is_trailing_comma(token: &SyntaxToken<'_>) -> bool {
+    if token.text() != ","
+        || token
+            .leading_trivia()
+            .chain(token.trailing_trivia())
+            .any(|t| t.is_comment())
+    {
+        return false;
+    }
+    let Some(next) = std::iter::successors(token.next_token(), SyntaxToken::next_token)
+        .find(|t| !t.is_trivia() && !t.is_missing())
+    else {
+        return false;
+    };
+    matches!(next.text(), ")" | "]")
+        && next
+            .leading_trivia()
+            .any(|t| t.kind() == TriviaKind::Newline)
+        && !next.leading_trivia().any(|t| t.is_comment())
 }
 
 fn check_code(before: &Tree, after: &Tree) -> Result<(), Difference> {
@@ -238,7 +265,10 @@ impl Comment<'_> {
 
 fn comments(parse: &Tree) -> Vec<Comment<'_>> {
     let mut out = Vec::new();
-    let owners = parse.syntax().tokens().filter(SyntaxToken::owns_trivia);
+    let owners = parse
+        .syntax()
+        .tokens()
+        .filter(|t| t.owns_trivia() && !is_trailing_comma(t));
     for (index, token) in owners.enumerate() {
         let owner = Some((index, token.text()));
         for (placement, trivia) in token
@@ -321,6 +351,28 @@ mod tests {
 
     fn differs(before: &str, after: &str) -> Difference {
         check_equivalent(before, after).expect_err("should differ")
+    }
+
+    #[test]
+    fn a_trailing_comma_may_come_or_go() {
+        let without = "val x = f(\n  a,\n  b\n)\nval y = 1 // y\n";
+        let with = "val x = f(\n  a,\n  b,\n)\nval y = 1 // y\n";
+        assert_eq!(check_equivalent(without, with), Ok(()));
+        assert_eq!(check_equivalent(with, without), Ok(()));
+        let types = "type T = Map[\n  A,\n  B,\n]\n";
+        assert_eq!(check_equivalent("type T = Map[A, B]\n", types), Ok(()));
+    }
+
+    #[test]
+    fn a_comma_before_a_closing_parenthesis_on_its_line_counts() {
+        // Not a trailing comma: Scala allows one only before a line break.
+        let d = differs("val x = f(a)\n", "val x = f(a,)\n");
+        assert_eq!(d.kind, DifferenceKind::Code);
+    }
+
+    #[test]
+    fn a_trailing_comma_with_a_comment_counts() {
+        differs("val x = f(\n  a, // a\n)\n", "val x = f(\n  a // a\n)\n");
     }
 
     #[test]

@@ -33,8 +33,11 @@ pub(super) struct Reindent {
 }
 
 impl Reindent {
-    pub(super) fn new(tree: &Tree) -> Reindent {
-        compute(tree).unwrap_or_default()
+    /// `relaid` lists the `(` and `)` of lists whose line breaks the
+    /// formatter decides: what follows the `)` ends up on a line indented
+    /// as the `(`'s line, whether the list is joined or broken.
+    pub(super) fn new(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Reindent {
+        compute(tree, relaid).unwrap_or_default()
     }
 
     /// The new indentation of the line whose first non-blank character is
@@ -74,7 +77,7 @@ struct Line {
     comment: bool,
 }
 
-fn compute(tree: &Tree) -> Option<Reindent> {
+fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Reindent> {
     let text = tree.syntax().text();
     let copied_for_layout = tree.verbatim_ranges().iter().any(|v| {
         matches!(
@@ -115,6 +118,21 @@ fn compute(tree: &Tree) -> Option<Reindent> {
         });
     }
     let line_of = |offset: TextSize| lines.partition_point(|l| l.first <= offset).checked_sub(1);
+    // The line of a relaid list's `)` stands for the line of its `(`.
+    let mut moved = HashMap::new();
+    for &(open, close) in relaid {
+        if let (Some(open), Some(close)) = (line_of(open), line_of(close))
+            && open != close
+        {
+            moved.insert(close, open);
+        }
+    }
+    let opener_line = |mut line: usize| {
+        while let Some(&to) = moved.get(&line) {
+            line = to;
+        }
+        line
+    };
 
     let mut containers = vec![Container {
         inner: tree.syntax().text_range(),
@@ -168,7 +186,7 @@ fn compute(tree: &Tree) -> Option<Reindent> {
         let target = match container.opener {
             None => 0,
             Some(opener) => {
-                let Some(line) = line_of(opener.text_range().start()) else {
+                let Some(line) = line_of(opener.text_range().start()).map(opener_line) else {
                     continue;
                 };
                 let width = lines[line].width as isize + shift[owner[line]];
@@ -340,7 +358,7 @@ mod tests {
     /// The source with each line moved to its new indentation.
     fn reindented(source: &str) -> String {
         let tree = parse(source);
-        let reindent = Reindent::new(&tree);
+        let reindent = Reindent::new(&tree, &[]);
         let mut out = String::new();
         let mut start = 0;
         for line in source.split_inclusive('\n') {
@@ -385,7 +403,7 @@ mod tests {
     #[test]
     fn already_formatted_code_stays() {
         let source = "object A {\n  def f = {\n    g(\n      a\n    )\n  }\n}\n";
-        assert_eq!(Reindent::new(&parse(source)).len(), 0);
+        assert_eq!(Reindent::new(&parse(source), &[]).len(), 0);
     }
 
     #[test]
@@ -399,7 +417,7 @@ mod tests {
     #[test]
     fn an_end_marker_read_as_a_statement_stays() {
         let source = "trait A:\n//\nend A\n";
-        assert_eq!(Reindent::new(&parse(source)).len(), 0);
+        assert_eq!(Reindent::new(&parse(source), &[]).len(), 0);
     }
 
     #[test]

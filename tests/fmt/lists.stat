@@ -15,7 +15,7 @@ val x = compute(
   alpha,
   beta,
   gamma,
-  delta
+  delta,
 )
 
 <<< parameters indent four spaces
@@ -23,7 +23,7 @@ def compute(alpha: Int, beta: Int): Int = 1
 >>>
 def compute(
     alpha: Int,
-    beta: Int
+    beta: Int,
 ): Int = 1
 
 <<< class parameters, with what follows after the closing parenthesis
@@ -31,7 +31,7 @@ case class Point(x: Int, y: Int) extends Shape
 >>>
 case class Point(
     x: Int,
-    y: Int
+    y: Int,
 ) extends Shape
 
 <<< with several parameter lists, the last one that doesn't fit breaks
@@ -47,7 +47,7 @@ val y = outer(inner(alpha, beta, gamma, delta, epsilon))
 >>>
 val x = outer(
   inner(alpha, beta),
-  gamma1
+  gamma1,
 )
 val y = outer(
   inner(
@@ -55,7 +55,7 @@ val y = outer(
     beta,
     gamma,
     delta,
-    epsilon
+    epsilon,
   )
 )
 
@@ -73,7 +73,7 @@ object A {
       beta,
       gamma,
       delta,
-      e
+      e,
     )
   }
 }
@@ -83,7 +83,7 @@ val x = f(alpha, beta).andThenSomethingElse
 >>>
 val x = f(
   alpha,
-  beta
+  beta,
 ).andThenSomethingElse
 
 <<< one argument breaks too, even if it still doesn't fit
@@ -98,26 +98,117 @@ val result = someVeryLongFunctionName()
 >>>
 val result = someVeryLongFunctionName()
 
-<<< a list written over several lines keeps its line breaks
+<<< a list written over several lines is joined if it fits
 val x = compute(alpha,
     beta, gamma)
+def f(
+    a: Int,
+    b: Int
+) = a
 >>>
-val x = compute(alpha,
-    beta, gamma)
+val x = compute(alpha, beta, gamma)
+def f(a: Int, b: Int) = a
+
+<<< a list written over several lines that doesn't fit goes one per line, with a trailing comma
+val result = someFunction(firstArgument, secondArgument,
+  thirdArgument, fourthArgument, fifthArgument)
+>>>
+val result = someFunction(
+  firstArgument,
+  secondArgument,
+  thirdArgument,
+  fourthArgument,
+  fifthArgument,
+)
+
+<<< the source's line breaks don't matter: these come out the same
+val x = f(a, b,
+  c)
+val x = f(
+  a,
+  b,
+  c
+)
+val x = f(a,
+          b,
+          c)
+>>>
+val x = f(a, b, c)
+val x = f(a, b, c)
+val x = f(a, b, c)
+
+<<< a lambda alone in the arguments over several lines is joined
+val z = foo(
+  x => x + 1
+)
+>>>
+val z = foo(x => x + 1)
+
+<<< a for expression over several lines keeps the list as written
+class A:
+  given a: Arb[C] = Arb(
+    for n <- Gen.alphaStr
+    yield C(n)
+  )
+>>>
+class A:
+  given a: Arb[C] = Arb(
+    for n <- Gen.alphaStr
+    yield C(n)
+  )
+
+<<< a block after a list over several lines is indented from the line it ends up on
+def test() =
+  fn2(
+      arg = "blue sleeps faster than tuesday",
+      arg2 = "the quick brown fox jumped over the lazy dog"): env =>
+      val x = env
+      println(x)
+>>>
+def test() =
+  fn2(
+    arg = "blue sleeps faster than tuesday",
+    arg2 = "the quick brown fox jumped over the lazy dog",
+  ): env =>
+    val x = env
+    println(x)
+
+<<< an item over several lines keeps the list as written
+val x = f(a,
+  g {
+    b
+  })
+>>>
+val x = f(a,
+  g {
+    b
+  })
 
 <<< a list with a comment stays as written
 val x = compute(alpha, /* b */ beta, gamma)
 >>>
 val x = compute(alpha, /* b */ beta, gamma)
 
-<<< a trailing comma stays as written
+<<< a trailing comma in the source doesn't matter
 val x = compute(
   alpha,
 )
+val y = compute(alpha, beta,
+    gamma,
+)
+def f(
+  a: Int,
+  b: Int,
+) = a
 >>>
-val x = compute(
-  alpha,
-)
+val x = compute(alpha)
+val y = compute(alpha, beta, gamma)
+def f(a: Int, b: Int) = a
+
+<<< a trailing comma before `)` on its line, an error, stays as written
+type T[X,] = X
+>>>
+type T[X,] = X
 
 <<< inside a Scala 3 indentation region
 def f =
@@ -129,7 +220,7 @@ def f =
     alpha,
     beta,
     gamma,
-    delta
+    delta,
   )
   x
 
@@ -159,7 +250,7 @@ val ys = transform(
   xs,
   x => x + 1,
   ys,
-  zs
+  zs,
 )
 
 <<< a placeholder function is not a lambda
@@ -179,7 +270,7 @@ val ys = xs.map(x =>
     beta,
     gamma,
     delta,
-    eps
+    eps,
   )
 )
 
@@ -236,7 +327,7 @@ def sequential[
     Alpha,
     Beta,
     Gamma,
-    Delta
+    Delta,
 ]: Unit = ()
 
 <<< type parameters fit; the value parameters after them break
@@ -251,7 +342,7 @@ val m: Map[ModuleIdentifier, VersionNumber] = x
 >>>
 val m: Map[
   ModuleIdentifier,
-  VersionNumber
+  VersionNumber,
 ] = x
 
 <<< type parameters with variance and bounds
@@ -260,5 +351,5 @@ class Cache[+Key <: Ordered[Key], Value, Third]
 class Cache[
     +Key <: Ordered[Key],
     Value,
-    Third
+    Third,
 ]
