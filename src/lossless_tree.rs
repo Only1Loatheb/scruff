@@ -8,6 +8,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
+pub(crate) use equivalence::is_type_wildcard_place;
 pub use equivalence::{Difference, DifferenceKind, Location, check_equivalent};
 pub use indentation::RegionProblem;
 pub use syntax_kind::SyntaxKind;

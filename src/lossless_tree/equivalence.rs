@@ -15,13 +15,14 @@
 //! be added or removed: it means nothing. And a dialect's new syntax means
 //! the same as the old: `import a.*` as `import a._`, `b as c` as `b => c`
 //! in an import or export, and braces around a lone rename mean nothing,
-//! `import a.b as c` as `import a.{b => c}`.
+//! `import a.b as c` as `import a.{b => c}`. A type wildcard `?` means the
+//! same as `_`: `List[?]` as `List[_]`.
 
 use std::fmt;
 
 use super::{
-    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, Tree, TriviaKind,
-    WalkEvent, parse,
+    NodeOrToken, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, SyntaxTrivia, TextSize, Tree,
+    TriviaKind, WalkEvent, parse,
 };
 
 /// The first way two texts differ.
@@ -113,9 +114,12 @@ fn new_kind(kind: SyntaxKind) -> SyntaxKind {
 }
 
 /// A token's text in a dialect's new syntax: `*` for an import's `_`, `as`
-/// for a rename's `=>`. Its kind changes with its text, so the text stands
-/// for both.
+/// for a rename's `=>`, `?` for a type wildcard's `_`. Its kind changes with
+/// its text, so the text stands for both.
 fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
+    if is_type_wildcard_token(token) {
+        return (None, "?");
+    }
     let parent = token.parent().map(|p| p.kind());
     match (parent, token.text()) {
         (Some(SyntaxKind::NamespaceWildcard), "_") => (None, "*"),
@@ -123,6 +127,58 @@ fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
         (Some(SyntaxKind::NamespaceWildcard), "*")
         | (Some(SyntaxKind::AsRenamedIdentifier), "as") => (None, token.text()),
         (_, text) => (Some(token.kind()), text),
+    }
+}
+
+/// Whether `element` is where a type wildcard goes: a type argument, as in
+/// `List[_]`, or what a bound limits in one, as in `List[_ <: A]` or
+/// `List[_ >: A <: B]`. Type parameters, as in `def f[F[_]]`, are not.
+pub(crate) fn is_type_wildcard_place(element: SyntaxElement<'_>) -> bool {
+    let mut element = element;
+    loop {
+        let Some(parent) = element.parent() else {
+            return false;
+        };
+        match parent.kind() {
+            SyntaxKind::TypeArguments => return true,
+            SyntaxKind::InfixType
+                if element.field_name() == Some("left")
+                    && parent
+                        .child_by_field_name("operator")
+                        .is_some_and(|op| matches!(op.text(), "<:" | ">:")) =>
+            {
+                element = NodeOrToken::Node(parent);
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// A type wildcard written `_`, a node around its token.
+fn is_type_wildcard_node(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::Wildcard && is_type_wildcard_place(NodeOrToken::Node(*node))
+}
+
+/// The token of a type wildcard, `_` or `?`.
+fn is_type_wildcard_token(token: &SyntaxToken<'_>) -> bool {
+    match token.text() {
+        "_" => token.parent().is_some_and(|p| is_type_wildcard_node(&p)),
+        "?" => {
+            token.kind() == SyntaxKind::TypeIdentifier
+                && is_type_wildcard_place(NodeOrToken::Token(*token))
+        }
+        _ => false,
+    }
+}
+
+/// A token's field, or for a type wildcard's `_`, its node's: the node
+/// around it is skipped.
+fn token_field(token: &SyntaxToken<'_>) -> Option<&'static str> {
+    match token.parent() {
+        Some(parent) if token.text() == "_" && is_type_wildcard_node(&parent) => {
+            parent.field_name()
+        }
+        _ => token.field_name(),
     }
 }
 
@@ -144,7 +200,7 @@ impl Step<'_> {
             (Step::Token(a), Step::Token(b)) => {
                 new_token(a) == new_token(b)
                     && a.is_missing() == b.is_missing()
-                    && a.field_name() == b.field_name()
+                    && token_field(a) == token_field(b)
             }
             _ => false,
         }
@@ -181,7 +237,9 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
     root.preorder_with_tokens().filter_map(|event| match event {
         WalkEvent::Enter(element) | WalkEvent::Leave(element) if element.is_trivia() => None,
         WalkEvent::Enter(NodeOrToken::Node(node)) | WalkEvent::Leave(NodeOrToken::Node(node))
-            if is_transparent_block(&node) || is_lone_rename_braces(&node) =>
+            if is_transparent_block(&node)
+                || is_lone_rename_braces(&node)
+                || is_type_wildcard_node(&node) =>
         {
             None
         }
@@ -428,6 +486,18 @@ mod tests {
         let new = "import a.*\nimport a.{b as c, d as _, *}\nexport e.*\n";
         assert_eq!(check_equivalent(old, new), Ok(()));
         assert_eq!(check_equivalent(new, old), Ok(()));
+    }
+
+    #[test]
+    fn question_mark_type_wildcards_mean_the_same() {
+        let old = "val a: Map[_, _ <: A] = b /* c */\nval d: List[_ >: A <: B] = e\n";
+        let new = "val a: Map[?, ? <: A] = b /* c */\nval d: List[? >: A <: B] = e\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // Only where a type wildcard goes.
+        differs("def f[F[_]] = 1\n", "def f[F[?]] = 1\n");
+        differs("val a: List[_ + A] = b\n", "val a: List[? + A] = b\n");
+        differs("val a: List[A] = b\n", "val a: List[?] = b\n");
     }
 
     #[test]

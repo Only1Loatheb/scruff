@@ -4,12 +4,17 @@
 //! allows the new syntax, and back where it doesn't. A rename without
 //! braces, `import a.b as c`, gets them: `import a.{b => c}`.
 //!
+//! A type wildcard `_` becomes `?`, as in `List[?]`, where the dialect
+//! allows it. Not back: without it, `?` is a type's name.
+//!
 //! Only tokens change; comments and whitespace stay where they are, and
 //! code copied verbatim, such as `format: off` blocks, is left alone.
 //! `check_equivalent` treats each old form and its new one as the same.
 
 use crate::config::Dialect;
-use crate::lossless_tree::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree};
+use crate::lossless_tree::{
+    NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, Tree, is_type_wildcard_place,
+};
 
 /// The source rewritten for `dialect`, or `None` if nothing changes.
 pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
@@ -30,6 +35,18 @@ pub(super) fn rewrite(tree: &Tree, dialect: Dialect) -> Option<String> {
             SyntaxKind::NamespaceWildcard => {
                 for token in tokens().filter(|t| t.text() == "*") {
                     edits.push((token.text_range(), "_".to_string()));
+                }
+            }
+            SyntaxKind::Wildcard
+                if dialect.question_mark_type_wildcard
+                    && is_type_wildcard_place(NodeOrToken::Node(node)) =>
+            {
+                for token in tokens().filter(|t| t.text() == "_") {
+                    // `_<:A` is fine, but `?<:` would be one operator.
+                    let end = usize::from(token.text_range().end());
+                    let joins = text[end..].chars().next().is_some_and(is_operator_char);
+                    let mark = if joins { "? " } else { "?" };
+                    edits.push((token.text_range(), mark.to_string()));
                 }
             }
             SyntaxKind::ArrowRenamedIdentifier if dialect.as_for_import_rename => {
@@ -95,6 +112,11 @@ pub(crate) fn after_a_path(rename: SyntaxNode<'_>) -> bool {
         .is_some_and(|t| t.text() == ".")
 }
 
+/// A character of an operator such as `<:`, which `?` would join.
+fn is_operator_char(c: char) -> bool {
+    "!#%&*+-/:<=>?@\\^|~".contains(c)
+}
+
 /// `word` in place of `token`, with a space on each side where the source
 /// has none, so `b=>c` doesn't become `basc`.
 fn spaced(text: &str, token: &SyntaxToken<'_>, word: &str) -> String {
@@ -122,9 +144,11 @@ mod tests {
     use super::*;
     use crate::lossless_tree::parse;
 
-    const NEW: Dialect = Dialect {
-        star_wildcard_import: true,
-        as_for_import_rename: true,
+    const NEW: Dialect = Dialect::SCALA3;
+    const OLD: Dialect = Dialect {
+        star_wildcard_import: false,
+        as_for_import_rename: false,
+        question_mark_type_wildcard: false,
     };
 
     fn rewritten(source: &str, dialect: Dialect) -> String {
@@ -180,26 +204,27 @@ mod tests {
     #[test]
     fn only_what_the_dialect_allows() {
         let star_only = Dialect {
-            star_wildcard_import: true,
             as_for_import_rename: false,
+            ..NEW
         };
         assert_eq!(
             rewritten("import a.{b => c, _}\n", star_only),
             "import a.{b => c, *}\n"
         );
-        let neither = Dialect {
-            star_wildcard_import: false,
-            as_for_import_rename: false,
+        assert_eq!(rewrite(&parse("import a.{b => c, _}\n"), OLD), None);
+        let no_question_mark = Dialect {
+            question_mark_type_wildcard: false,
+            ..NEW
         };
-        assert_eq!(rewrite(&parse("import a.{b => c, _}\n"), neither), None);
+        assert_eq!(
+            rewrite(&parse("val a: List[_] = b\n"), no_question_mark),
+            None
+        );
     }
 
     #[test]
     fn back_to_scala_2() {
-        let scala2 = Dialect {
-            star_wildcard_import: false,
-            as_for_import_rename: false,
-        };
+        let scala2 = OLD;
         assert_eq!(
             rewritten("import a.{b as c, d as _, *}\n", scala2),
             "import a.{b => c, d => _, _}\n"
@@ -212,6 +237,45 @@ mod tests {
         assert_eq!(rewrite(&parse("import a.{b => c, _}\n"), scala2), None);
         // No Scala 2 form without a path.
         assert_eq!(rewrite(&parse("import foo as f\n"), scala2), None);
+    }
+
+    #[test]
+    fn type_wildcards() {
+        for (source, expected) in [
+            ("val a: List[_] = b\n", "val a: List[?] = b\n"),
+            ("def f(m: Map[_, Int]) = m\n", "def f(m: Map[?, Int]) = m\n"),
+            ("val a: List[_ <: A] = b\n", "val a: List[? <: A] = b\n"),
+            (
+                "val a: List[_ >: A <: B] = b\n",
+                "val a: List[? >: A <: B] = b\n",
+            ),
+            ("val a: List[_<:A] = b\n", "val a: List[? <:A] = b\n"),
+            (
+                "x match { case _: List[_] => }\n",
+                "x match { case _: List[?] => }\n",
+            ),
+            ("val a: F[List[_]] = b\n", "val a: F[List[?]] = b\n"),
+        ] {
+            assert_eq!(rewritten(source, NEW), expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn not_type_wildcards() {
+        for source in [
+            // Type parameters.
+            "def f[F[_]](x: F[Int]) = x\n",
+            "type F[_] = Int\n",
+            "class C[A[_ <: B]]\n",
+            // Not a type.
+            "val f = g(_)\n",
+            "val a: List[?] = b\n",
+        ] {
+            assert_eq!(rewrite(&parse(source), NEW), None, "{source}");
+        }
+        // Without the new syntax, `?` is a name: kind-projector's
+        // placeholder here.
+        assert_eq!(rewrite(&parse("val a: F[Either[A, ?]] = b\n"), OLD), None);
     }
 
     #[test]

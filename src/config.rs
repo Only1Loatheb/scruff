@@ -25,8 +25,8 @@
 //! - `project.includeFilters` and `project.excludeFilters`, their older
 //!   form: regexes that must match somewhere in the path. Include filters
 //!   replace the default include paths unless those are set as well.
-//! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`
-//!   and `allowAsForImportRename`, also under `fileOverride`, whose patterns
+//! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
+//!   `allowAsForImportRename` and `allowQuestionMarkAsTypeWildcard`, also under `fileOverride`, whose patterns
 //!   are tried longest first, as in scalafmt. The dialect is `scala3` when
 //!   none is named.
 
@@ -71,6 +71,9 @@ pub struct Dialect {
     pub star_wildcard_import: bool,
     /// `import a.{b as c}` for `import a.{b => c}`.
     pub as_for_import_rename: bool,
+    /// `List[?]` for `List[_]`. Without it, `?` is a type's name, as in
+    /// kind-projector's `Either[A, ?]`, so it isn't rewritten back.
+    pub question_mark_type_wildcard: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -87,6 +90,7 @@ impl Dialect {
     pub const SCALA3: Dialect = Dialect {
         star_wildcard_import: true,
         as_for_import_rename: true,
+        question_mark_type_wildcard: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -102,6 +106,7 @@ impl Dialect {
         Some(Dialect {
             star_wildcard_import: new_syntax,
             as_for_import_rename: new_syntax,
+            question_mark_type_wildcard: new_syntax,
         })
     }
 }
@@ -113,6 +118,7 @@ struct DialectSetting {
     name: Option<String>,
     star_wildcard_import: Option<bool>,
     as_for_import_rename: Option<bool>,
+    question_mark_type_wildcard: Option<bool>,
 }
 
 impl DialectSetting {
@@ -130,6 +136,9 @@ impl DialectSetting {
         }
         if let Some(allow) = self.as_for_import_rename {
             dialect.as_for_import_rename = allow;
+        }
+        if let Some(allow) = self.question_mark_type_wildcard {
+            dialect.question_mark_type_wildcard = allow;
         }
         Ok(dialect)
     }
@@ -164,6 +173,9 @@ impl DialectSetting {
             }
             if let Some(allow) = flag("allowAsForImportRename")? {
                 setting.as_for_import_rename = Some(allow);
+            }
+            if let Some(allow) = flag("allowQuestionMarkAsTypeWildcard")? {
+                setting.question_mark_type_wildcard = Some(allow);
             }
         }
         Ok(setting)
@@ -804,10 +816,12 @@ mod tests {
         let new = Dialect {
             star_wildcard_import: true,
             as_for_import_rename: true,
+            question_mark_type_wildcard: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
             as_for_import_rename: false,
+            question_mark_type_wildcard: false,
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
         assert_eq!(Dialect::named("Scala213Source3"), Some(new));
@@ -836,6 +850,7 @@ mod tests {
               "glob:**/scala-2/**" { runner.dialect = scala213 }
               "glob:**/src/main/scala-2/**" = scala213source3
               ".sbt" { runner.dialectOverride.allowStarWildcardImport = false }
+            ".sc" { runner.dialectOverride.allowQuestionMarkAsTypeWildcard = false }
             }
             "#,
         );
@@ -848,6 +863,8 @@ mod tests {
         assert!(longest.star_wildcard_import && !longest.as_for_import_rename);
         assert!(!dialect("/p/src/test/scala-2/A.scala").star_wildcard_import);
         assert!(!dialect("/p/build.sbt").star_wildcard_import);
+        assert!(dialect("/p/build.sbt").question_mark_type_wildcard);
+        assert!(!dialect("/p/a.sc").question_mark_type_wildcard);
         // With no file, the dialect no pattern changes.
         assert_eq!(c.dialect_for(None), base);
     }

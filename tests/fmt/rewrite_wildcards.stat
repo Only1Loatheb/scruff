@@ -1,0 +1,46 @@
+# Type wildcards as `?` where the dialect allows it: in type arguments and
+# their bounds. The dialect is Scala 3 unless a case names another.
+
+<<< type arguments
+def f(a: List[_], b: Map[_, Seq[_]]): Option[_] = None
+>>>
+def f(a: List[?], b: Map[?, Seq[?]]): Option[?] = None
+
+<<< bounds
+val a: Map[_ <: A, _ >: B <: C] = b
+val c: List[_<:A] = d
+>>>
+val a: Map[? <: A, ? >: B <: C] = b
+val c: List[? <: A] = d
+
+<<< type patterns
+x match {
+  case _: List[_] => 1
+}
+>>>
+x match {
+  case _: List[?] => 1
+}
+
+<<< type parameters keep `_`
+def f[F[_]](x: F[Int]) = x
+type G[_] = Int
+>>>
+def f[F[_]](x: F[Int]) = x
+type G[_] = Int
+
+<<< Scala 2 with -Xsource:3 has `?`
+dialect = scala212source3
+===
+val a: List[_] = b
+>>>
+val a: List[?] = b
+
+<<< plain Scala 2.13 keeps `_`, and `?` is a name there
+dialect = scala213
+===
+val a: List[_] = b
+val c: Functor[Either[A, ?]] = d
+>>>
+val a: List[_] = b
+val c: Functor[Either[A, ?]] = d

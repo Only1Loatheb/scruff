@@ -1679,14 +1679,14 @@ mod tests {
          the `0b2` below",
     )];
 
-    /// Rewrites the imports of every error-free file in the corpus to Scala
-    /// 3's syntax and to Scala 2.13's, checking that each result is
+    /// Rewrites every error-free file in the corpus to Scala 3's syntax and
+    /// to Scala 2.13's, checking that each result is
     /// equivalent, stable when formatted again, and has none of the other
     /// syntax left. Run with:
     /// `cargo test --release corpus_rewrites -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
-    fn corpus_rewrites_imports() {
+    fn corpus_rewrites_to_the_dialect() {
         use crate::config::Dialect;
         let files = crate::lossless_tree::corpus::corpus_files();
         let mut failures = Vec::new();
@@ -1729,6 +1729,9 @@ mod tests {
                     // `import foo as f` has no Scala 2 form.
                     n.kind() == rename && (new || rewrite::after_a_path(*n))
                         || n.kind() == SyntaxKind::NamespaceWildcard && n.text() == wildcard
+                        || new
+                            && n.kind() == SyntaxKind::Wildcard
+                            && crate::lossless_tree::is_type_wildcard_place(NodeOrToken::Node(*n))
                 });
                 // Unless it's copied verbatim, as in `format: off`.
                 if let Some(node) =
@@ -1741,10 +1744,7 @@ mod tests {
                     ));
                 }
             }
-            println!(
-                "{name}: {} files, {rewritten} with imports rewritten",
-                files.len()
-            );
+            println!("{name}: {} files, {rewritten} rewritten", files.len());
         }
         for failure in failures.iter().take(15) {
             println!("{failure}");
