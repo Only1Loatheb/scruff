@@ -1534,6 +1534,7 @@ fn precedence(op: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rayon::prelude::*;
 
     fn fmt(source: &str) -> String {
         format(source, &FormatOptions::default()).unwrap_or_else(|e| panic!("{e}"))
@@ -1696,54 +1697,61 @@ mod tests {
                 dialect,
                 ..FormatOptions::default()
             };
-            let mut rewritten = 0;
-            for path in &files {
-                let Ok(source) = std::fs::read_to_string(path) else {
-                    continue;
-                };
-                let tree = parse(&source);
-                if !tree.errors().is_empty()
-                    || KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file))
-                {
-                    continue;
-                }
-                rewritten += usize::from(rewrite::rewrite(&tree, dialect).is_some());
-                let out = match format(&source, &options) {
-                    Ok(out) => out,
-                    Err(e) => {
-                        failures.push(format!("{name}: {}: {e}", path.display()));
-                        continue;
+            // For each file, whether it was rewritten, and its failures.
+            let per_file: Vec<(bool, Vec<String>)> = files
+                .par_iter()
+                .filter_map(|path| {
+                    let source = std::fs::read_to_string(path).ok()?;
+                    let tree = parse(&source);
+                    if !tree.errors().is_empty()
+                        || KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file))
+                    {
+                        return None;
                     }
-                };
-                if format(&out, &options).as_deref() != Ok(out.as_str()) {
-                    failures.push(format!("{name}: {}: not idempotent", path.display()));
-                }
-                let tree = parse(&out);
-                let other = tree.syntax().descendants().find(|n| {
-                    let wildcard = if new { "_" } else { "*" };
-                    let rename = if new {
-                        SyntaxKind::ArrowRenamedIdentifier
-                    } else {
-                        SyntaxKind::AsRenamedIdentifier
+                    let rewritten = rewrite::rewrite(&tree, dialect).is_some();
+                    let mut failures = Vec::new();
+                    let out = match format(&source, &options) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            failures.push(format!("{name}: {}: {e}", path.display()));
+                            return Some((rewritten, failures));
+                        }
                     };
-                    // `import foo as f` has no Scala 2 form.
-                    n.kind() == rename && (new || rewrite::after_a_path(*n))
-                        || n.kind() == SyntaxKind::NamespaceWildcard && n.text() == wildcard
-                        || new
-                            && n.kind() == SyntaxKind::Wildcard
-                            && crate::lossless_tree::is_type_wildcard_place(NodeOrToken::Node(*n))
-                });
-                // Unless it's copied verbatim, as in `format: off`.
-                if let Some(node) =
-                    other.filter(|n| tree.verbatim_at(n.text_range().start()).is_none())
-                {
-                    let (line, col) = tree.line_col(node.text_range().start());
-                    failures.push(format!(
-                        "{name}: {}:{line}:{col}: other syntax left",
-                        path.display()
-                    ));
-                }
-            }
+                    if format(&out, &options).as_deref() != Ok(out.as_str()) {
+                        failures.push(format!("{name}: {}: not idempotent", path.display()));
+                    }
+                    let tree = parse(&out);
+                    let other = tree.syntax().descendants().find(|n| {
+                        let wildcard = if new { "_" } else { "*" };
+                        let rename = if new {
+                            SyntaxKind::ArrowRenamedIdentifier
+                        } else {
+                            SyntaxKind::AsRenamedIdentifier
+                        };
+                        // `import foo as f` has no Scala 2 form.
+                        n.kind() == rename && (new || rewrite::after_a_path(*n))
+                            || n.kind() == SyntaxKind::NamespaceWildcard && n.text() == wildcard
+                            || new
+                                && n.kind() == SyntaxKind::Wildcard
+                                && crate::lossless_tree::is_type_wildcard_place(NodeOrToken::Node(
+                                    *n,
+                                ))
+                    });
+                    // Unless it's copied verbatim, as in `format: off`.
+                    if let Some(node) =
+                        other.filter(|n| tree.verbatim_at(n.text_range().start()).is_none())
+                    {
+                        let (line, col) = tree.line_col(node.text_range().start());
+                        failures.push(format!(
+                            "{name}: {}:{line}:{col}: other syntax left",
+                            path.display()
+                        ));
+                    }
+                    Some((rewritten, failures))
+                })
+                .collect();
+            let rewritten = per_file.iter().filter(|(rewritten, _)| *rewritten).count();
+            failures.extend(per_file.into_iter().flat_map(|(_, failures)| failures));
             println!("{name}: {} files, {rewritten} rewritten", files.len());
         }
         for failure in failures.iter().take(15) {
@@ -1760,35 +1768,69 @@ mod tests {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_formats_every_file() {
         let files = crate::lossless_tree::corpus::corpus_files();
+        /// What became of one file.
+        enum Outcome {
+            Skipped,
+            Refused,
+            Failed(String),
+            /// Lines before and after, and whether formatting again changed it.
+            Formatted {
+                changed: bool,
+                before: usize,
+                after: usize,
+                stable: bool,
+            },
+        }
+        // Lines with code or comments.
+        let lines = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).count();
+        let outcomes: Vec<(&std::path::PathBuf, Outcome)> = files
+            .par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).ok()?;
+                let outcome = match format(&source, &FormatOptions::default()) {
+                    Err(FormatError::SyntaxErrors(_)) => Outcome::Skipped,
+                    Err(FormatError::NotEquivalent(_))
+                        if KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file)) =>
+                    {
+                        Outcome::Refused
+                    }
+                    Err(e) => Outcome::Failed(e.to_string()),
+                    Ok(out) => Outcome::Formatted {
+                        changed: out != source,
+                        before: lines(&source),
+                        after: lines(&out),
+                        stable: format(&out, &FormatOptions::default()).as_deref()
+                            == Ok(out.as_str()),
+                    },
+                };
+                Some((path, outcome))
+            })
+            .collect();
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
         let (mut broken, mut lines_added, mut joined, mut lines_removed) = (0, 0, 0, 0);
-        // Lines with code or comments.
-        let lines = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).count();
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            match format(&source, &FormatOptions::default()) {
-                Err(FormatError::SyntaxErrors(_)) => skipped += 1,
-                Err(FormatError::NotEquivalent(_))
-                    if KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file)) =>
-                {
-                    refused += 1;
-                }
-                Err(e) => failures.push(format!("{}: {e}", path.display())),
-                Ok(out) => {
+        for (path, outcome) in outcomes {
+            match outcome {
+                Outcome::Skipped => skipped += 1,
+                Outcome::Refused => refused += 1,
+                Outcome::Failed(e) => failures.push(format!("{}: {e}", path.display())),
+                Outcome::Formatted {
+                    changed: c,
+                    before,
+                    after,
+                    stable,
+                } => {
                     formatted += 1;
-                    changed += usize::from(out != source);
-                    if lines(&out) > lines(&source) {
+                    changed += usize::from(c);
+                    if after > before {
                         broken += 1;
-                        lines_added += lines(&out) - lines(&source);
+                        lines_added += after - before;
                     }
-                    if lines(&out) < lines(&source) {
+                    if after < before {
                         joined += 1;
-                        lines_removed += lines(&source) - lines(&out);
+                        lines_removed += before - after;
                     }
-                    if format(&out, &FormatOptions::default()).as_deref() != Ok(out.as_str()) {
+                    if !stable {
                         failures.push(format!("{}: not idempotent", path.display()));
                     }
                 }
@@ -1874,15 +1916,14 @@ mod tests {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_structural_rules_match_fallback() {
         let files = crate::lossless_tree::corpus::corpus_files();
-        let mut failures = Vec::new();
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            if let Some(difference) = rules_disagree(&source) {
-                failures.push(format!("{}: {difference}", path.display()));
-            }
-        }
+        let failures: Vec<String> = files
+            .par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).ok()?;
+                let difference = rules_disagree(&source)?;
+                Some(format!("{}: {difference}", path.display()))
+            })
+            .collect();
         for failure in failures.iter().take(15) {
             println!("{failure}");
         }
@@ -1913,21 +1954,24 @@ mod tests {
         // Formatted copies of the changed files, to compare with `diff -r`.
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sbt-formatted");
         let _ = std::fs::remove_dir_all(&out_dir);
-        let mut changed = 0;
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let Ok(out) = format(&source, &options(path)) else {
-                continue;
-            };
-            if out != source {
-                changed += 1;
+        let changed = files
+            .par_iter()
+            .filter(|path| {
+                let Ok(source) = std::fs::read_to_string(path) else {
+                    return false;
+                };
+                let Ok(out) = format(&source, &options(path)) else {
+                    return false;
+                };
+                if out == source {
+                    return false;
+                }
                 let copy = out_dir.join(path.strip_prefix(&root).unwrap());
                 std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
                 std::fs::write(copy, out).unwrap();
-            }
-        }
+                true
+            })
+            .count();
         println!("formatted copies in {}", out_dir.display());
         println!("{} sbt files, {changed} changed", files.len());
     }

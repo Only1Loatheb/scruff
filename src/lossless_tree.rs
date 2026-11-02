@@ -1201,6 +1201,7 @@ object Main extends App {
 #[cfg(test)]
 pub(crate) mod corpus {
     use super::*;
+    use rayon::prelude::*;
     use std::path::{Path, PathBuf};
 
     /// The `.scala` files under `$SCUFF_CORPUS`, or under `modules/`.
@@ -1253,21 +1254,22 @@ pub(crate) mod corpus {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_widened_spaces_are_equivalent() {
         let files = corpus_files();
-        let (mut failures, mut skipped) = (Vec::new(), 0);
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            // tree-sitter's error recovery can change with spacing alone, so
-            // code with syntax errors isn't safe to reformat.
-            if !parse(&source).errors().is_empty() {
-                skipped += 1;
-                continue;
-            }
-            if let Err(difference) = check_equivalent(&source, &widen_spaces(&source)) {
-                failures.push(format!("{}: {difference}", path.display()));
-            }
-        }
+        // For each file, None if it's skipped, or else the difference.
+        let results: Vec<Option<Option<String>>> = files
+            .par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).ok()?;
+                // tree-sitter's error recovery can change with spacing
+                // alone, so code with syntax errors isn't safe to reformat.
+                if !parse(&source).errors().is_empty() {
+                    return Some(None);
+                }
+                let difference = check_equivalent(&source, &widen_spaces(&source)).err();
+                Some(Some(difference.map(|d| format!("{}: {d}", path.display()))))
+            })
+            .collect();
+        let skipped = results.iter().filter(|r| r.is_none()).count();
+        let failures: Vec<String> = results.into_iter().flatten().flatten().collect();
         for failure in failures.iter().take(10) {
             println!("{failure}");
         }
@@ -1285,30 +1287,37 @@ pub(crate) mod corpus {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_indentation_region_problems() {
         let files = corpus_files();
+        // For each file, its regions and the problems among them.
+        let per_file: Vec<(usize, Vec<(String, String)>)> = files
+            .par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).ok()?;
+                let tree = parse(&source);
+                if !tree.errors().is_empty() {
+                    return None;
+                }
+                let (mut regions, mut problems) = (0, Vec::new());
+                for region in tree
+                    .syntax()
+                    .descendants()
+                    .filter(SyntaxNode::is_indentation_region)
+                {
+                    regions += 1;
+                    if let Some(problem) = region.region_problem() {
+                        let (line, _) = tree.line_col(region.text_range().start());
+                        let at = format!("{}:{line} {:?}", path.display(), region.kind());
+                        problems.push((format!("{problem:?}"), at));
+                    }
+                }
+                Some((regions, problems))
+            })
+            .collect();
         let mut regions = 0;
         let mut by_problem = std::collections::BTreeMap::<String, Vec<String>>::new();
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let tree = parse(&source);
-            if !tree.errors().is_empty() {
-                continue;
-            }
-            for region in tree
-                .syntax()
-                .descendants()
-                .filter(SyntaxNode::is_indentation_region)
-            {
-                regions += 1;
-                if let Some(problem) = region.region_problem() {
-                    let (line, _) = tree.line_col(region.text_range().start());
-                    let at = format!("{}:{line} {:?}", path.display(), region.kind());
-                    by_problem
-                        .entry(format!("{problem:?}"))
-                        .or_default()
-                        .push(at);
-                }
+        for (count, problems) in per_file {
+            regions += count;
+            for (problem, at) in problems {
+                by_problem.entry(problem).or_default().push(at);
             }
         }
         println!("{} files, {regions} regions", files.len());
@@ -1324,51 +1333,63 @@ pub(crate) mod corpus {
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_round_trips() {
         let files = corpus_files();
+        // For each file: its comments, whether it has syntax errors, and
+        // the reasons for its verbatim ranges.
+        let per_file: Vec<(usize, bool, Vec<String>)> = files
+            .par_iter()
+            .filter_map(|path| {
+                let source = std::fs::read_to_string(path).ok()?;
+                let tree = parse(&source);
+                let root = tree.syntax();
+                assert_eq!(root.to_string(), source, "{}", path.display());
+                assert_eq!(trivia::reassemble(&tree), source, "{}", path.display());
+                for node in root.descendants() {
+                    let text: String = node.tokens().map(|t| t.text()).collect();
+                    assert_eq!(text, node.text(), "{node:?} in {}", path.display());
+                }
+                let attached: usize = root
+                    .tokens()
+                    .map(|t| {
+                        t.leading_trivia()
+                            .chain(t.trailing_trivia())
+                            .filter(|t| t.is_comment())
+                            .count()
+                    })
+                    .sum::<usize>()
+                    + tree.eof_trivia().filter(|t| t.is_comment()).count();
+                let in_tree = root
+                    .descendants_with_tokens()
+                    .filter(|e| match e {
+                        NodeOrToken::Node(n) => {
+                            n.is_extra() && !n.parent().is_some_and(|p| p.is_extra())
+                        }
+                        NodeOrToken::Token(t) => t.is_extra() && !t.parent().unwrap().is_extra(),
+                    })
+                    .count();
+                assert_eq!(
+                    attached,
+                    in_tree,
+                    "every comment attached once: {}",
+                    path.display()
+                );
+                verbatim::assert_well_formed(&tree);
+                let reasons = tree
+                    .verbatim_ranges()
+                    .iter()
+                    .map(|range| {
+                        let reason = format!("{:?}", range.reason);
+                        reason.split('(').next().unwrap_or_default().to_string()
+                    })
+                    .collect();
+                Some((attached, !tree.errors().is_empty(), reasons))
+            })
+            .collect();
         let (mut with_errors, mut comments) = (0, 0);
         let mut verbatim = std::collections::BTreeMap::<String, usize>::new();
-        for path in &files {
-            let Ok(source) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let tree = parse(&source);
-            let root = tree.syntax();
-            assert_eq!(root.to_string(), source, "{}", path.display());
-            assert_eq!(trivia::reassemble(&tree), source, "{}", path.display());
-            for node in root.descendants() {
-                let text: String = node.tokens().map(|t| t.text()).collect();
-                assert_eq!(text, node.text(), "{node:?} in {}", path.display());
-            }
-            let attached: usize = root
-                .tokens()
-                .map(|t| {
-                    t.leading_trivia()
-                        .chain(t.trailing_trivia())
-                        .filter(|t| t.is_comment())
-                        .count()
-                })
-                .sum::<usize>()
-                + tree.eof_trivia().filter(|t| t.is_comment()).count();
-            let in_tree = root
-                .descendants_with_tokens()
-                .filter(|e| match e {
-                    NodeOrToken::Node(n) => {
-                        n.is_extra() && !n.parent().is_some_and(|p| p.is_extra())
-                    }
-                    NodeOrToken::Token(t) => t.is_extra() && !t.parent().unwrap().is_extra(),
-                })
-                .count();
-            assert_eq!(
-                attached,
-                in_tree,
-                "every comment attached once: {}",
-                path.display()
-            );
+        for (attached, has_errors, reasons) in per_file {
             comments += attached;
-            with_errors += usize::from(!tree.errors().is_empty());
-            verbatim::assert_well_formed(&tree);
-            for range in tree.verbatim_ranges() {
-                let reason = format!("{:?}", range.reason);
-                let reason = reason.split('(').next().unwrap_or_default().to_string();
+            with_errors += usize::from(has_errors);
+            for reason in reasons {
                 *verbatim.entry(reason).or_default() += 1;
             }
         }
