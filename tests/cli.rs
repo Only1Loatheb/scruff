@@ -1,7 +1,7 @@
 //! Runs the `scuff` binary.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 const UNFORMATTED: &str = "object A {\n  def f(x:Int)=x+1\n}\n";
@@ -15,7 +15,21 @@ fn file(name: &str, contents: &str) -> PathBuf {
 }
 
 fn scuff(args: &[&str], stdin: &str) -> Output {
+    scuff_in(Path::new(env!("CARGO_TARGET_TMPDIR")), args, stdin)
+}
+
+/// A new, empty directory for a test's project.
+fn project(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs scuff in `dir`.
+fn scuff_in(dir: &Path, args: &[&str], stdin: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_scuff"))
+        .current_dir(dir)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -114,4 +128,100 @@ fn a_missing_file_exits_with_2() {
     let out = scuff(&["format", "no-such-file.scala"], "");
     assert_eq!(out.status.code(), Some(2));
     assert!(text(&out.stderr).contains("can't read no-such-file.scala"));
+}
+
+#[test]
+fn several_files_report_in_order_and_errors_win() {
+    let dir = project("several_files");
+    std::fs::write(dir.join("a.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("b.scala"), "object B {\n  def f( = 1\n").unwrap();
+    std::fs::write(dir.join("c.scala"), UNFORMATTED).unwrap();
+    let out = scuff_in(
+        &dir,
+        &["format", "--check", "a.scala", "b.scala", "c.scala"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = text(&out.stderr);
+    let lines: Vec<_> = stderr.lines().collect();
+    assert_eq!(lines.first(), Some(&"a.scala: would be reformatted"));
+    assert_eq!(lines.last(), Some(&"c.scala: would be reformatted"));
+    assert!(lines[1].starts_with("b.scala:2:"), "{stderr}");
+}
+
+#[test]
+fn a_dash_with_files_is_an_error() {
+    let path = file("dash_with_files.scala", FORMATTED);
+    let out = scuff(&["format", "-", path.to_str().unwrap()], "");
+    assert_eq!(out.status.code(), Some(2));
+}
+
+#[test]
+fn files_the_config_excludes_are_skipped() {
+    let dir = project("excluded");
+    std::fs::write(
+        dir.join(".scalafmt.conf"),
+        "maxColumn = 100\nproject.excludePaths = [\"glob:**/gen/**\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join("gen")).unwrap();
+    std::fs::write(dir.join("gen/A.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("B.scala"), UNFORMATTED).unwrap();
+    let out = scuff_in(&dir, &["format", "--check", "gen/A.scala"], "");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stderr), "");
+    let out = scuff_in(&dir, &["format", "gen/A.scala", "B.scala"], "");
+    assert!(out.status.success());
+    let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap();
+    assert_eq!(read("gen/A.scala"), UNFORMATTED);
+    assert_eq!(read("B.scala"), FORMATTED);
+}
+
+#[test]
+fn max_column_comes_from_the_config() {
+    let dir = project("max_column");
+    std::fs::write(dir.join(".scalafmt.conf"), "maxColumn = 20\n").unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/A.scala"), "val x = f(alpha, beta)\n").unwrap();
+    let out = scuff_in(&dir, &["format", "src/A.scala"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/A.scala")).unwrap(),
+        "val x = f(\n  alpha,\n  beta,\n)\n"
+    );
+    // Standard input follows the config for the current directory.
+    let out = scuff_in(&dir, &["format"], "val x = f(alpha, beta)\n");
+    assert_eq!(text(&out.stdout), "val x = f(\n  alpha,\n  beta,\n)\n");
+}
+
+#[test]
+fn a_broken_config_exits_with_2_and_names_it() {
+    let dir = project("broken_config");
+    std::fs::write(dir.join(".scalafmt.conf"), "maxColumn = wide\n").unwrap();
+    std::fs::write(dir.join("A.scala"), UNFORMATTED).unwrap();
+    let out = scuff_in(&dir, &["format", "A.scala"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        text(&out.stderr).contains(".scalafmt.conf: maxColumn"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("A.scala")).unwrap(),
+        UNFORMATTED
+    );
+}
+
+#[test]
+fn scuff_toml_comes_before_scalafmt_conf() {
+    let dir = project("scuff_toml");
+    std::fs::write(dir.join(".scalafmt.conf"), "maxColumn = 100\n").unwrap();
+    std::fs::write(dir.join(".scuff.toml"), "max-column = 20\n").unwrap();
+    std::fs::write(dir.join("A.scala"), "val x = f(alpha, beta)\n").unwrap();
+    let out = scuff_in(&dir, &["format", "A.scala"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("A.scala")).unwrap(),
+        "val x = f(\n  alpha,\n  beta,\n)\n"
+    );
 }

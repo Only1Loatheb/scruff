@@ -1645,18 +1645,14 @@ mod tests {
     #[ignore = "slow; reports differences from scalafmt over modules/sbt"]
     fn corpus_sbt_differences_from_scalafmt() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("modules/sbt");
-        // sbt's `project.excludePaths`, and its scripted tests.
-        let excluded = [
-            "/contraband-scala/",
-            "/launcher-package/citest",
-            "-test/",
-            "/server-test/src/server-test/",
-            "/src/sbt-test/",
-        ];
+        // The files sbt's `.scalafmt.conf` formats, at its width.
+        let config = crate::config::Config::load(&root.join(crate::config::SCALAFMT_FILE)).unwrap();
+        let options = FormatOptions {
+            max_width: config.max_column,
+        };
         let files: Vec<_> = crate::lossless_tree::corpus::corpus_files()
             .into_iter()
-            .filter(|f| f.starts_with(&root))
-            .filter(|f| !excluded.iter().any(|e| f.to_string_lossy().contains(e)))
+            .filter(|f| f.starts_with(&root) && config.includes(f))
             .collect();
         // Formatted copies of the changed files, to compare with `diff -r`.
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/sbt-formatted");
@@ -1666,7 +1662,7 @@ mod tests {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let Ok(out) = format(&source, &FormatOptions::default()) else {
+            let Ok(out) = format(&source, &options) else {
                 continue;
             };
             if out != source {

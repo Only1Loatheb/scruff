@@ -6,8 +6,11 @@ description = "formatter"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+hocon-parser = "1.14.2"
 rayon = "1.12"
+regex = "1"
 text-size = "1.1.1"
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
 tree-sitter = "0.27.1"
 tree-sitter-scala = "0.26.4"
 
