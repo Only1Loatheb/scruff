@@ -2154,6 +2154,8 @@ mod tests {
                                 && n.kind() == SyntaxKind::ColonArgument
                                 && rewrite::fewer_braces_back(&tree, *n).is_some()
                             || new && rewrite::and_type(*n)
+                            || n.kind() == SyntaxKind::ExtendsClause
+                                && rewrite::extends_separators(&tree, *n, new).is_some()
                     });
                     // Unless it's copied verbatim, as in `format: off`, or left as
                     // written because tree-sitter-scala reads it differently

@@ -1,5 +1,5 @@
-# Compound types as intersection ones, `A with B` as `A & B`, where the
-# dialect allows them. The dialect is Scala 3 unless a case names another.
+# Compound types as intersection ones, `A with B` as `A & B`, and
+# `extends A, B` for `extends A with B`, where the dialect allows them. The dialect is Scala 3 unless a case names another.
 
 <<< types
 val x: A with B with C = y
@@ -38,11 +38,11 @@ type T = A /* the first */ with B
 >>>
 type T = A /* the first */ & B
 
-<<< `new` and `extends` keep `with`
+<<< `new` keeps `with`, and `extends` gets commas
 trait T extends A with B
 val a = new A with B
 >>>
-trait T extends A with B
+trait T extends A, B
 val a = new A with B
 
 <<< a refinement keeps `with`
@@ -61,3 +61,31 @@ dialect = scala213source3
 type T = A with B
 >>>
 type T = A with B
+
+<<< extends, one line
+class K(x: Int) extends A(x) with B[X] with C { def f = 1 }
+>>>
+class K(x: Int) extends A(x), B[X], C { def f = 1 }
+
+<<< extends, a leading `with` on each line
+object all
+    extends SetInstances
+    with FutureInstances
+    with ListInstances
+>>>
+object all
+    extends SetInstances,
+    FutureInstances,
+    ListInstances
+
+<<< extends back in Scala 2
+dialect = scala213
+===
+trait T extends A, B
+>>>
+trait T extends A with B
+
+<<< early definitions keep `with`
+object O extends { val x = 1 } with A
+>>>
+object O extends { val x = 1 } with A

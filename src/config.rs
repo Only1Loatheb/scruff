@@ -92,6 +92,9 @@ pub struct Dialect {
     /// An intersection type for a compound one: `A & B` for `A with B`.
     /// Only Scala 3's.
     pub and_types: bool,
+    /// Commas between the parents a class extends: `extends A, B` for
+    /// `extends A with B`. Only Scala 3's.
+    pub comma_separated_extends: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -115,6 +118,7 @@ impl Dialect {
         fewer_braces: true,
         given_using: true,
         and_types: true,
+        comma_separated_extends: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -139,6 +143,7 @@ impl Dialect {
             fewer_braces: scala3,
             given_using: scala3,
             and_types: scala3,
+            comma_separated_extends: scala3,
         })
     }
 }
@@ -819,6 +824,7 @@ mod tests {
             fewer_braces: true,
             given_using: true,
             and_types: true,
+            comma_separated_extends: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -830,6 +836,7 @@ mod tests {
             fewer_braces: false,
             given_using: false,
             and_types: false,
+            comma_separated_extends: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
@@ -837,6 +844,7 @@ mod tests {
             fewer_braces: false,
             given_using: false,
             and_types: false,
+            comma_separated_extends: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));

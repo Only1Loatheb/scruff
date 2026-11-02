@@ -63,7 +63,7 @@ def f[ /* t */ A](a: A): Map[ /* k */ String, /* v */ Int] = Map()
 <<< after extends and with
 class A extends  /* a */ B with  /* b */  C
 >>>
-class A extends /* a */ B with /* b */ C
+class A extends /* a */ B, /* b */ C
 
 <<< after an operator, ending the line
 val x = a +  // why
@@ -157,7 +157,7 @@ val y = f(/* a */x/* b */)
 >>>
 @inline /* hot */ def f = 1
 def g /* a */ = 1
-class A extends B with /* b */ C
+class A extends B, /* b */ C
 val m: Map[String, /* v */ Int] = Map()
 val x = if a then b else /* no */ c
 val y = f( /* a */ x /* b */ )

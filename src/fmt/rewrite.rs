@@ -35,6 +35,14 @@
 //! reads infix types left to right whatever their operators, so the
 //! equivalence check couldn't tell.
 //!
+//! The parents a class extends are separated by commas: `extends A with
+//! B` becomes `extends A, B`, where the dialect allows it, and back. A
+//! `with` that starts a line leaves its comma at the end of the line
+//! before, except inside a body, where in an indentation region
+//! tree-sitter-scala ends the clause at the line's `,`. Not with Scala 2's early definitions, `extends { val x = 1 }
+//! with A`, which Scala 3 doesn't have, and not in an enum case, where
+//! tree-sitter-scala reads `case C extends E, B` as two cases.
+//!
 //! Only tokens change; comments and whitespace stay where they are, and
 //! code copied verbatim, such as `format: off` blocks, is left alone.
 //! `check_equivalent` treats each old form and its new one as the same.
@@ -42,7 +50,8 @@
 use crate::config::Dialect;
 use crate::lossless_tree::{
     NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize, Tree,
-    check_equivalent_trees, is_implicit_clause_keyword, is_type_wildcard_place, parse,
+    check_equivalent_trees, is_extends_separator, is_implicit_clause_keyword,
+    is_type_wildcard_place, parse,
 };
 
 /// A rewrite tree-sitter-scala reads as the same code.
@@ -259,6 +268,10 @@ fn edits_for(
                     edits.push((token.text_range(), "&".to_string()));
                 }
             }
+            SyntaxKind::ExtendsClause => {
+                let separators = extends_separators(tree, node, dialect.comma_separated_extends);
+                edits.extend(separators.into_iter().flatten());
+            }
             SyntaxKind::Vararg | SyntaxKind::RepeatPattern => {
                 if let Some(edit) = splice(text, node, dialect.postfix_star_vararg_splices)
                     .filter(|(range, _)| tree.verbatim_at(range.start()).is_none())
@@ -351,6 +364,101 @@ fn edits_for(
             _ => {}
         }
     }
+}
+
+/// The edits that separate the parents in an `extends` clause by commas,
+/// `extends A, B`, or else by `with`, `extends A with B`, or `None` if
+/// there's nothing to change. Not where it mixes the two, has early
+/// definitions, `extends { val x = 1 } with A`, is an enum case's, or has a
+/// `with` that starts a line with comments around it, alone on its line, or
+/// inside a body, where tree-sitter-scala ends the clause at the `,`.
+pub(super) fn extends_separators(
+    tree: &Tree,
+    clause: SyntaxNode<'_>,
+    commas: bool,
+) -> Option<Vec<Edit>> {
+    let text = tree.syntax().text();
+    // tree-sitter-scala reads `case C extends E, B` as two enum cases.
+    let enum_case = clause.parent().is_some_and(|p| {
+        matches!(
+            p.kind(),
+            SyntaxKind::SimpleEnumCase | SyntaxKind::FullEnumCase
+        )
+    });
+    let parts: Vec<_> = clause.non_trivia_children().collect();
+    if enum_case || parts.iter().any(|p| p.kind() == SyntaxKind::StructuralType) {
+        return None;
+    }
+    let separators: Vec<SyntaxToken<'_>> = parts
+        .iter()
+        .filter_map(|p| p.as_token().copied())
+        .filter(is_extends_separator)
+        .collect();
+    let old = if commas { "with" } else { "," };
+    if separators.is_empty()
+        || separators
+            .iter()
+            .any(|t| t.text() != old || tree.verbatim_at(t.text_range().start()).is_some())
+    {
+        return None;
+    }
+    let mut edits = Vec::new();
+    for separator in separators {
+        let previous = std::iter::successors(separator.prev_token(), SyntaxToken::prev_token)
+            .find(|t| !t.is_trivia())?;
+        let next = std::iter::successors(separator.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia())?;
+        let at = |offset: TextSize| usize::from(offset);
+        let before = &text[at(previous.text_range().end())..at(separator.text_range().start())];
+        let after = &text[at(separator.text_range().end())..at(next.text_range().start())];
+        let blank = |gap: &str| gap.chars().all(char::is_whitespace);
+        if !commas {
+            // `A,B` needs spaces around `with`.
+            let space = if blank(after) && !after.is_empty() {
+                ""
+            } else {
+                " "
+            };
+            edits.push((separator.text_range(), format!(" with{space}")));
+        } else if before.contains('\n') {
+            // `A` then `with B` on the next line: `A,` then `B`. Not in an
+            // indentation region, or braces that may become one, where
+            // tree-sitter-scala ends the clause at a line ending in `,`.
+            if !blank(before) || !blank(after) || after.contains('\n') || in_body(clause) {
+                return None;
+            }
+            edits.push((TextRange::empty(previous.text_range().end()), ",".into()));
+            edits.push((
+                TextRange::new(separator.text_range().start(), next.text_range().start()),
+                String::new(),
+            ));
+        } else if blank(before) {
+            let start = previous.text_range().end();
+            edits.push((
+                TextRange::new(start, separator.text_range().end()),
+                ",".into(),
+            ));
+        } else {
+            edits.push((separator.text_range(), ",".into()));
+        }
+    }
+    Some(edits)
+}
+
+/// Whether `node` is inside a body: a block, cases, or a class, enum or
+/// extension body, with or without braces.
+fn in_body(node: SyntaxNode<'_>) -> bool {
+    node.ancestors().skip(1).any(|a| {
+        a.is_indentation_region()
+            || matches!(
+                a.kind(),
+                SyntaxKind::Block
+                    | SyntaxKind::CaseBlock
+                    | SyntaxKind::TemplateBody
+                    | SyntaxKind::EnumBody
+                    | SyntaxKind::WithTemplateBody
+            )
+    })
 }
 
 /// Whether `node` is a compound type, as `A with B`, that becomes an
@@ -1314,6 +1422,7 @@ mod tests {
         fewer_braces: false,
         given_using: false,
         and_types: false,
+        comma_separated_extends: false,
     };
 
     /// The rewritten text, if anything changed.
@@ -1425,7 +1534,6 @@ mod tests {
         );
         for source in [
             "val a = new A with B\n",
-            "trait T extends A with B\n",
             "val x: A with B { def f: Int } = y\n",
             "type T = A with B + C\n",
             "type T = A | B with C\n",
@@ -1438,6 +1546,55 @@ mod tests {
         let source3 = Dialect::named("scala213source3").unwrap();
         assert_eq!(changed("type T = A with B\n", source3), None);
         assert_eq!(changed("type T = A & B\n", OLD), None);
+    }
+
+    #[test]
+    fn extends_gets_commas() {
+        assert_eq!(
+            rewritten("trait T extends A with B[X] with C\n", NEW),
+            "trait T extends A, B[X], C\n"
+        );
+        assert_eq!(
+            rewritten("class K(x: Int) extends A(x) with B\n", NEW),
+            "class K(x: Int) extends A(x), B\n"
+        );
+        // A leading `with` leaves its comma on the line before.
+        assert_eq!(
+            rewritten("object O\n    extends A\n    with B\n    with C\n", NEW),
+            "object O\n    extends A,\n    B,\n    C\n"
+        );
+        for source in [
+            "object O extends { val x = 1 } with A\n",
+            "enum E:\n  case C extends E with B\n",
+            "object O:\n  class C\n      extends A\n      with B:\n    def f = 1\n",
+            "object O extends A\n    /* c */ with B\n",
+            "trait T extends A, B\n",
+            "val a = new A with B\n",
+        ] {
+            assert_eq!(changed(source, NEW), None, "{source}");
+        }
+        // Braces that become a region keep a leading `with`.
+        assert_eq!(
+            rewritten(
+                "object O {\n  trait T\n      extends A\n      with B\n}\n",
+                NEW
+            ),
+            "object O:\n  trait T\n      extends A\n      with B\n"
+        );
+        // And back.
+        assert_eq!(
+            rewritten("trait T extends A, B[X],C\n", OLD),
+            "trait T extends A with B[X] with C\n"
+        );
+        assert_eq!(
+            rewritten("object O extends A,\n    B\n", OLD),
+            "object O extends A with\n    B\n"
+        );
+        let source3 = Dialect::named("scala213source3").unwrap();
+        assert_eq!(
+            rewritten("trait T extends A, B\n", source3),
+            "trait T extends A with B\n"
+        );
     }
 
     #[test]
@@ -1653,7 +1810,7 @@ mod tests {
             ("class A {\n  val x = 1\n}\n", "class A:\n  val x = 1\n"),
             (
                 "class A extends B with C {\n  val x = 1\n}\n",
-                "class A extends B with C:\n  val x = 1\n",
+                "class A extends B, C:\n  val x = 1\n",
             ),
             ("enum E {\n  case A, B\n}\n", "enum E:\n  case A, B\n"),
             ("x match {\n  case a => 1\n}\n", "x match\n  case a => 1\n"),

@@ -33,6 +33,8 @@
 //! as one compound type, so a chain of `&` counts as one compound type.
 //! In a pattern, as `case x: (A & B)`, the type needs parentheses, which
 //! `A with B` may go without: `case x: A & B` is the pattern `x: A` and `B`.
+//! Commas between the parents a class extends mean the same as `with`:
+//! `extends A, B` as `extends A with B`.
 
 use std::fmt;
 
@@ -210,6 +212,15 @@ fn is_and_type_operator(token: &SyntaxToken<'_>) -> bool {
     }
 }
 
+/// Whether `token` is the `with` or `,` between two parents in an
+/// `extends` clause, which mean the same.
+pub(crate) fn is_extends_separator(token: &SyntaxToken<'_>) -> bool {
+    matches!(token.text(), "with" | ",")
+        && token
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::ExtendsClause)
+}
+
 /// A token's text in a dialect's new syntax: `*` for an import's `_`, `as`
 /// for a rename's `=>`, `?` for a type wildcard's `_`. Its kind changes with
 /// its text, so the text stands for both.
@@ -222,6 +233,9 @@ fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
     }
     if is_and_type_operator(token) {
         return (None, "&");
+    }
+    if is_extends_separator(token) {
+        return (None, ",");
     }
     let parent = token.parent().map(|p| p.kind());
     match (parent, token.text()) {
@@ -937,6 +951,18 @@ mod tests {
         // Other operators and parts.
         differs("type T = A with B\n", "type T = A | B\n");
         differs("type T = A with B\n", "type T = A & C\n");
+    }
+
+    #[test]
+    fn commas_in_extends_mean_with() {
+        let old = "class C(x: X) extends A(x) with B[Y] /* c */ with\n  D\n";
+        let new = "class C(x: X) extends A(x), B[Y] /* c */,\n  D\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // Only between parents.
+        differs("class C extends A with B\n", "class C extends A, D\n");
+        differs("val a = new A with B\n", "val a = new A, B\n");
+        differs("class C extends A[X with Y]\n", "class C extends A[X, Y]\n");
     }
 
     #[test]
