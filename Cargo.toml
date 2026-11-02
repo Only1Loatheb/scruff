@@ -18,3 +18,12 @@ tree-sitter-scala = "0.26.4"
 [profile.release]
 strip = true
 lto = true
+
+[dev-dependencies]
+pprof = { version = "0.15.0", features = ["flamegraph"] }
+
+# Release with symbols, for `examples/profile.rs`.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
