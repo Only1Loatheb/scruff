@@ -6,6 +6,7 @@ description = "formatter"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+rayon = "1.12"
 text-size = "1.1.1"
 tree-sitter = "0.27.1"
 tree-sitter-scala = "0.26.4"

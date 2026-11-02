@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use rayon::prelude::*;
 use scuff::fmt;
 use scuff::lossless_tree;
 
@@ -22,9 +23,9 @@ enum Command {
     /// it can't be formatted: it can't be read or written, has syntax
     /// errors, or formatting would change what the code means.
     Format {
-        /// The file to format, overwritten with the result; reads standard
+        /// The files to format, overwritten with the result; reads standard
         /// input and prints the result when omitted or `-`
-        file: Option<PathBuf>,
+        files: Vec<PathBuf>,
 
         /// Print nothing; instead exit with 1, naming the file, if it would
         /// change
@@ -50,56 +51,65 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Command::Format { file, check } => format(file, check),
+        Command::Format { files, check } => format(files, check),
         Command::Parse { file, quiet } => parse(file, quiet),
         Command::Comments { file } => comments(file),
     }
 }
 
-fn format(file: Option<PathBuf>, check: bool) -> ExitCode {
-    let path = file.clone().filter(|f| f.as_os_str() != "-");
-    let (name, source) = match read_source(file) {
-        Ok(input) => input,
-        Err(code) => return code,
-    };
-    match fmt::format(&source, &fmt::FormatOptions::default()) {
-        Ok(formatted) if check => {
-            if formatted == source {
-                ExitCode::SUCCESS
-            } else {
-                eprintln!("{name}: would be reformatted");
-                ExitCode::FAILURE
-            }
-        }
-        Ok(formatted) => match path {
-            // Only a file that changes is written, so its time stamp moves
-            // only then.
-            Some(path) if formatted != source => match std::fs::write(&path, formatted) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    eprintln!("error: can't write {name}: {err}");
-                    ExitCode::from(2)
+fn format(files: Vec<PathBuf>, check: bool) -> ExitCode {
+    let codes: Vec<ExitCode> = files
+        .par_iter()
+        .map(|file| {
+            let (name, source) = match read_source(Some(file.clone())) {
+                Ok(input) => input,
+                Err(code) => {
+                    return code;
                 }
-            },
-            Some(_) => ExitCode::SUCCESS,
-            None => {
-                print!("{formatted}");
-                ExitCode::SUCCESS
+            };
+            match fmt::format(&source, &fmt::FormatOptions::default()) {
+                Ok(formatted) if check => {
+                    if formatted == source {
+                        // eprintln!("ok {name}");
+                        ()
+                    } else {
+                        eprintln!("{name}: would be reformatted");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                Ok(formatted) => {
+                    if formatted != source {
+                        match std::fs::write(&file, formatted) {
+                            Ok(()) => (),
+                            Err(err) => {
+                                eprintln!("error: can't write {name}: {err}");
+                                return ExitCode::from(2);
+                            }
+                        }
+                    }
+                }
+                Err(fmt::FormatError::SyntaxErrors(errors)) => {
+                    let tree = lossless_tree::parse(&source);
+                    for error in errors {
+                        let (line, col) = tree.line_col(error.range().start());
+                        eprintln!("{name}:{line}:{col}: error: {error}");
+                    }
+                    eprintln!("{name}: not formatted because of syntax errors");
+                    return ExitCode::from(2);
+                }
+                Err(error) => {
+                    eprintln!("{name}: error: {error}");
+                    return ExitCode::from(2);
+                }
             }
-        },
-        Err(fmt::FormatError::SyntaxErrors(errors)) => {
-            let tree = lossless_tree::parse(&source);
-            for error in errors {
-                let (line, col) = tree.line_col(error.range().start());
-                eprintln!("{name}:{line}:{col}: error: {error}");
-            }
-            eprintln!("{name}: not formatted because of syntax errors");
-            ExitCode::from(2)
-        }
-        Err(error) => {
-            eprintln!("{name}: error: {error}");
-            ExitCode::from(2)
-        }
+            ExitCode::SUCCESS
+        })
+        .filter(|code| *code != ExitCode::SUCCESS)
+        .collect();
+    if codes.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        codes[0]
     }
 }
 
