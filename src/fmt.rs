@@ -598,11 +598,14 @@ impl<'t> Formatter<'t> {
     /// on one line if it fits, otherwise broken before the first call's `.`
     /// and every `.` after it, each indented 2 spaces, as scalafmt's classic
     /// select chains in sbt's code. Field selects before the first call stay
-    /// with the head: `sys.env` in `sys.env.get(k).map(f)`.
+    /// with the head: `sys.env` in `sys.env.get(k).map(f)`. A colon argument
+    /// with more of the chain after it always breaks it, so what follows
+    /// lines up with its call: `.map: x =>`, the body, then `.filter(p)`.
     fn select_chain(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
         let ChainParts {
             first_line,
             segments,
+            broken,
         } = self.chain_parts(node)?;
         let leading = self.leading_of(node);
         // Line breaks before a `.` go: the rule puts its own there.
@@ -613,11 +616,25 @@ impl<'t> Formatter<'t> {
             }
             line.push(self.element(element));
         }
+        // Frames on the chain's nodes, such as a colon argument's from its
+        // `:`, which the fallback would place.
+        let mut frames = Vec::new();
+        let mut current = NodeOrToken::Node(node);
+        while let NodeOrToken::Node(n) = current
+            && let Some(spine) = chain_spine(n)
+        {
+            frames.extend(self.layout.frames_at(n));
+            current = spine;
+        }
         let mut rest = Vec::new();
         for segment in segments {
-            rest.push(Doc::softline());
+            rest.push(if broken {
+                Doc::hardline()
+            } else {
+                Doc::softline()
+            });
             self.skip_leading(&segment[0]);
-            rest.extend(segment.into_iter().map(|e| self.element(e)));
+            rest.extend(self.framed(&segment, &frames));
         }
         Some(
             leading
@@ -630,7 +647,9 @@ impl<'t> Formatter<'t> {
     /// The parts of a chain the [`Self::select_chain`] rule lays out, or
     /// `None` if it keeps the chain as written: it's part of a longer chain,
     /// has fewer than two calls or comments inside, a part that doesn't
-    /// print on one line, or a line break anywhere but before a `.`.
+    /// print on one line, or a line break anywhere but before a `.`. A
+    /// colon argument before the last part is the one part allowed over
+    /// several lines.
     fn chain_parts(&self, node: SyntaxNode<'t>) -> Option<ChainParts<'t>> {
         // Only the outermost node of a chain; the ones inside are its parts.
         if let Some(parent) = node.parent()
@@ -670,7 +689,17 @@ impl<'t> Formatter<'t> {
         segments.reverse();
         let calls = segments.iter().filter(|(_, applied)| *applied).count();
         let first_call = segments.iter().position(|(_, applied)| *applied)?;
-        if calls < 2 {
+        // A colon argument before the last part breaks the chain, so one
+        // call is enough then.
+        let colon_before_last = segments
+            .split_last()
+            .is_some_and(|(_, before)| {
+                before
+                    .iter()
+                    .flat_map(|(segment, _)| segment)
+                    .any(|e| e.kind() == SyntaxKind::ColonArgument)
+            });
+        if calls < 2 && !colon_before_last {
             return None;
         }
         let mut first_line = vec![head];
@@ -681,11 +710,47 @@ impl<'t> Formatter<'t> {
         }
         let segments: Vec<_> = segments.collect();
 
+        // A colon argument, with its `:`, before the last part.
+        let colon = |e: &SyntaxElement<'t>| {
+            e.kind() == SyntaxKind::ColonArgument
+                || e.kind() == T![":"]
+                    && e.parent().is_some_and(|p| p.kind() == SyntaxKind::CallExpression)
+        };
+        let (last, before_last) = segments.split_last()?;
+        let broken = before_last.iter().flatten().any(|e| e.kind() == SyntaxKind::ColonArgument);
+        // Its body must be placed, or its lines would keep their widths
+        // while the chain moves.
+        let placed = |e: &SyntaxElement<'t>| {
+            e.as_node().is_some_and(|argument| {
+                argument
+                    .children()
+                    .filter(|c| {
+                        matches!(c.kind(), SyntaxKind::IndentedBlock | SyntaxKind::IndentedCases)
+                    })
+                    .all(|region| self.layout.container(region).is_some())
+            })
+        };
+        if broken
+            && !before_last
+                .iter()
+                .flatten()
+                .filter(|e| e.kind() == SyntaxKind::ColonArgument)
+                .all(placed)
+        {
+            return None;
+        }
+        let allowed = |e: &SyntaxElement<'t>| {
+            broken && !last.contains(e) && !first_line.contains(e) && colon(e)
+        };
+
         // Each part prints on one line, and the source breaks lines only
         // before a `.`, in a gap the spacing rules decide, so the chain
         // printed flat matches the fallback.
         let elements: Vec<_> = first_line.iter().chain(segments.iter().flatten()).collect();
-        if !elements.iter().all(|e| self.prints_on_one_line(e)) {
+        if !elements
+            .iter()
+            .all(|e| allowed(e) || self.prints_on_one_line(e))
+        {
             return None;
         }
         for pair in elements.windows(2) {
@@ -694,7 +759,10 @@ impl<'t> Formatter<'t> {
                 return None;
             };
             let gap = TextRange::new(left.text_range().end(), right.text_range().start());
+            // Inside a colon argument, its own line breaks.
+            let inside = allowed(pair[0]) && pair[1].kind() == SyntaxKind::ColonArgument;
             if self.text[gap].contains(['\n', '\r'])
+                && !inside
                 && (right.kind() != T!["."] || self.rule_between(&left, &right) != Some(false))
             {
                 return None;
@@ -703,6 +771,7 @@ impl<'t> Formatter<'t> {
         Some(ChainParts {
             first_line,
             segments,
+            broken,
         })
     }
 
@@ -996,9 +1065,18 @@ impl<'t> Formatter<'t> {
     /// its comments and whitespace.
     fn fallback(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         let children: Vec<_> = node.non_trivia_children().collect();
-        // Frames from child tokens: each from a region's opener through
-        // the region.
         let frames = self.layout.frames_at(node);
+        Doc::concat(self.framed(&children, &frames))
+    }
+
+    /// `children` in order, with frames from child tokens: each from a
+    /// region's opener through the region, placing its lines from the line
+    /// the opener is on.
+    fn framed(
+        &mut self,
+        children: &[SyntaxElement<'t>],
+        frames: &[(TextSize, TextSize)],
+    ) -> Vec<Doc<'t>> {
         let mut docs = Vec::new();
         let mut i = 0;
         while i < children.len() {
@@ -1025,7 +1103,7 @@ impl<'t> Formatter<'t> {
                 }
             }
         }
-        Doc::concat(docs)
+        docs
     }
 
     fn element(&mut self, element: SyntaxElement<'t>) -> Doc<'t> {
@@ -1361,6 +1439,9 @@ struct ChainParts<'t> {
     first_line: Vec<SyntaxElement<'t>>,
     /// The rest, from the first call's `.` on: each starts with its `.`.
     segments: Vec<Vec<SyntaxElement<'t>>>,
+    /// Whether the chain always breaks: a colon argument comes before its
+    /// last part.
+    broken: bool,
 }
 
 /// A list split for [`Formatter::list`].

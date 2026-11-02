@@ -758,10 +758,11 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
     let after_on_line = after.filter(|a| !breaks(close.text_range().end(), a.text_range().start()));
     let selects = after_on_line.is_some_and(|a| a.text() == ".");
     if after_on_line.is_some_and(|a| !matches!(a.text(), "." | ")" | "]"))
-        || after_on_line
-            .is_some_and(|a| !text[at(close.text_range().end())..at(a.text_range().start())]
+        || after_on_line.is_some_and(|a| {
+            !text[at(close.text_range().end())..at(a.text_range().start())]
                 .trim()
-                .is_empty())
+                .is_empty()
+        })
     {
         return None;
     }
@@ -1619,10 +1620,7 @@ mod tests {
                 "val b = xs.map { x => a }.filter(p)\n",
                 "val b = xs.map: x =>\n  a\n.filter(p)\n",
             ),
-            (
-                "  foo(a)(b) { x => c }\n",
-                "  foo(a)(b): x =>\n    c\n",
-            ),
+            ("  foo(a)(b) { x => c }\n", "  foo(a)(b): x =>\n    c\n"),
         ] {
             assert_eq!(rewritten(braced, fewer), colon, "{braced}");
         }

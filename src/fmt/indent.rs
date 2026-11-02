@@ -600,13 +600,12 @@ fn definition_start(body: SyntaxNode<'_>) -> Option<SyntaxToken<'_>> {
     let owner = body.parent()?;
     // Also `case` clauses, from the start of their `match`, which may be on
     // an earlier line than the `match` keyword.
-    let starts_owner = matches!(
-        body.kind(),
-        SyntaxKind::TemplateBody
-            | SyntaxKind::EnumBody
-            | SyntaxKind::WithTemplateBody
-            | SyntaxKind::IndentedCases
-    );
+    // Not a colon argument's cases, which start after their `:`.
+    let starts_owner = match body.kind() {
+        SyntaxKind::TemplateBody | SyntaxKind::EnumBody | SyntaxKind::WithTemplateBody => true,
+        SyntaxKind::IndentedCases => owner.kind() != SyntaxKind::ColonArgument,
+        _ => false,
+    };
     if !starts_owner && !owner.kind().name().ends_with("_definition") {
         return None;
     }
@@ -614,12 +613,21 @@ fn definition_start(body: SyntaxNode<'_>) -> Option<SyntaxToken<'_>> {
 }
 
 /// The indentation the container's statements share, if each starts its own
-/// line at the same width. `None` for a container whose layout is left to
-/// the one around it, including one with no statements.
+/// line at the same width, or follows a `;` on the line before it. `None`
+/// for a container whose layout is left to the one around it, including one
+/// with no statements.
 fn statement_indent(container: &Container<'_>) -> Option<usize> {
     let mut indent = None;
     for statement in &container.statements {
         let first = first_token(statement)?;
+        // A statement after a `;` on the line before it moves with that line.
+        let after_semicolon = indent.is_some()
+            && std::iter::successors(first.prev_token(), SyntaxToken::prev_token)
+                .find(SyntaxToken::owns_trivia)
+                .is_some_and(|t| t.text() == ";");
+        if after_semicolon && !first.is_first_on_line() {
+            continue;
+        }
         // tree-sitter-scala reads `end Name` after a body holding only a
         // comment as a postfix call. Moving it would make it close something
         // else, and the tree wouldn't show it.
