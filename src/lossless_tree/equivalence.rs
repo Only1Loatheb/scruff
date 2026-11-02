@@ -27,7 +27,12 @@
 //! be added or removed where it names what it ends: it means nothing.
 //! And an `implicit` parameter clause means the same as a `using` one, as
 //! `def f(implicit ec: EC)` as `def f(using ec: EC)`, unless a class
-//! parameter in it is a `val` or `var` or has modifiers.
+//! parameter in it is a `val` or `var` or has modifiers. An intersection
+//! type `A & B & C` means the same as a compound one, `A with B with C`:
+//! tree-sitter-scala reads the first as nested infix types and the second
+//! as one compound type, so a chain of `&` counts as one compound type.
+//! In a pattern, as `case x: (A & B)`, the type needs parentheses, which
+//! `A with B` may go without: `case x: A & B` is the pattern `x: A` and `B`.
 
 use std::fmt;
 
@@ -130,6 +135,81 @@ fn new_kind(kind: SyntaxKind) -> SyntaxKind {
     }
 }
 
+/// A node's kind in a dialect's new syntax, as `new_kind`, and an
+/// intersection type's, `A & B`, as a compound type's, `A with B`.
+fn node_kind(node: &SyntaxNode<'_>) -> SyntaxKind {
+    if is_and_type(node) {
+        return SyntaxKind::CompoundType;
+    }
+    new_kind(node.kind())
+}
+
+/// An intersection type, `A & B`: an infix type whose operator is `&`.
+/// Not one right after a pattern's `:` or `given`, which Scala 3 reads as a
+/// pattern of its own: `case x: A & B` is `x: A` and `B`.
+fn is_and_type(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::InfixType
+        && node
+            .child_by_field_name("operator")
+            .is_some_and(|op| op.text() == "&")
+        && !node.parent().is_some_and(|p| is_type_pattern(&p))
+}
+
+/// A pattern with a type: `x: T` or `given T`.
+fn is_type_pattern(node: &SyntaxNode<'_>) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::TypedPattern | SyntaxKind::GivenPattern
+    )
+}
+
+/// Parentheses around a compound or intersection type in a pattern, as in
+/// `case x: (A & B)`, which `A with B` may go without: they mean nothing.
+fn is_pattern_type_parens(node: &SyntaxNode<'_>) -> bool {
+    if node.kind() != SyntaxKind::TupleType
+        || node.field_name() != Some("type")
+        || !node.parent().is_some_and(|p| is_type_pattern(&p))
+    {
+        return false;
+    }
+    let mut children = node.non_trivia_children();
+    matches!(
+        (children.next(), children.next(), children.next(), children.next()),
+        (Some(_), Some(NodeOrToken::Node(inner)), Some(_), None)
+            if is_and_type(&inner)
+                || inner.kind() == SyntaxKind::CompoundType
+                    && inner
+                        .children_with_tokens()
+                        .any(|c| c.as_token().is_some_and(|t| t.text() == "with"))
+                    && !inner.children().any(|c| c.kind() == SyntaxKind::Refinement)
+    )
+}
+
+/// The left part of an intersection type that is itself one, as `A & B` in
+/// `A & B & C`, which counts as part of the outer one: `A with B with C` is
+/// one compound type.
+fn is_nested_and_type(node: &SyntaxNode<'_>) -> bool {
+    is_and_type(node)
+        && node.field_name() == Some("left")
+        && node.parent().is_some_and(|p| is_and_type(&p))
+}
+
+/// Whether `token` is the `with` of a compound type or the `&` of an
+/// intersection one, which mean the same. Not the `with` of `new A with B`,
+/// which makes a class.
+fn is_and_type_operator(token: &SyntaxToken<'_>) -> bool {
+    match token.text() {
+        "with" => token.parent().is_some_and(|p| {
+            p.kind() == SyntaxKind::CompoundType
+                && !p
+                    .parent()
+                    .is_some_and(|q| q.kind() == SyntaxKind::InstanceExpression)
+        }),
+        "&" => token.parent().is_some_and(|p| is_and_type(&p)),
+        _ => false,
+    }
+}
+
 /// A token's text in a dialect's new syntax: `*` for an import's `_`, `as`
 /// for a rename's `=>`, `?` for a type wildcard's `_`. Its kind changes with
 /// its text, so the text stands for both.
@@ -139,6 +219,9 @@ fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
     }
     if is_implicit_clause_keyword(token) {
         return (None, "using");
+    }
+    if is_and_type_operator(token) {
+        return (None, "&");
     }
     let parent = token.parent().map(|p| p.kind());
     match (parent, token.text()) {
@@ -218,6 +301,13 @@ fn is_type_wildcard_token(token: &SyntaxToken<'_>) -> bool {
 /// node's: `c` in `if (c) a` is the condition, as in `if c then a`.
 fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
     match element.parent() {
+        // An intersection type's parts are a compound type's: the first
+        // is its base, the others extras, and the operator has no field.
+        Some(parent) if is_and_type(&parent) => match element.field_name() {
+            Some("left") => Some("base"),
+            Some("right") => Some("extra"),
+            _ => None,
+        },
         // A colon argument's lambda parameters are a lambda's, and its
         // body or cases are the call's arguments.
         Some(parent) if parent.kind() == SyntaxKind::ColonArgument => match element.field_name() {
@@ -233,7 +323,8 @@ fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
                 || is_transparent_block(&parent)
                 || is_case_body_block(&parent)
                 || is_type_wildcard_node(&parent)
-                || is_old_splice_node(&parent) =>
+                || is_old_splice_node(&parent)
+                || is_pattern_type_parens(&parent) =>
         {
             parent.field_name()
         }
@@ -253,10 +344,10 @@ impl Step<'_> {
     fn same_as(&self, other: &Step<'_>) -> bool {
         match (self, other) {
             (Step::Enter(a), Step::Enter(b)) => {
-                new_kind(a.kind()) == new_kind(b.kind())
+                node_kind(a) == node_kind(b)
                     && field(NodeOrToken::Node(*a)) == field(NodeOrToken::Node(*b))
             }
-            (Step::Leave(a), Step::Leave(b)) => new_kind(a.kind()) == new_kind(b.kind()),
+            (Step::Leave(a), Step::Leave(b)) => node_kind(a) == node_kind(b),
             (Step::Token(a), Step::Token(b)) => {
                 new_token(a) == new_token(b)
                     && a.is_missing() == b.is_missing()
@@ -305,6 +396,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_case_body_block(&node)
                 || is_argument_wrapper(&node)
                 || is_lone_catch_case(&node)
+                || is_nested_and_type(&node)
+                || is_pattern_type_parens(&node)
                 || is_optional_end_marker(&node) =>
         {
             None
@@ -325,6 +418,8 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
         || token.parent().is_some_and(|p| is_optional_end_marker(&p))
         || is_lone_rename_brace(token)
         || is_old_splice_token(token)
+        || (matches!(token.text(), "(" | ")")
+            && token.parent().is_some_and(|p| is_pattern_type_parens(&p)))
         || is_control_token(token)
         || is_optional_brace(token)
         || (token.text() == ":"
@@ -507,10 +602,12 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
 /// `catch case e => b` on one line does without.
 fn is_lone_catch_case(node: &SyntaxNode<'_>) -> bool {
     let lone_cases = |cases: &SyntaxNode<'_>| {
-        matches!(cases.kind(), SyntaxKind::IndentedCases | SyntaxKind::CaseBlock)
-            && cases
-                .parent()
-                .is_some_and(|p| p.kind() == SyntaxKind::CatchClause)
+        matches!(
+            cases.kind(),
+            SyntaxKind::IndentedCases | SyntaxKind::CaseBlock
+        ) && cases
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::CatchClause)
             && cases
                 .children()
                 .filter(|c| c.kind() == SyntaxKind::CaseClause)
@@ -807,6 +904,42 @@ mod tests {
     }
 
     #[test]
+    fn intersection_types_mean_compound_ones() {
+        let old = "val x: A with B /* c */ with C = y\ndef f(x: F[A with B]): A with B\n";
+        let new = "val x: A & B /* c */ & C = y\ndef f(x: F[A & B]): A & B\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        // Grouped differently.
+        differs("type T = A with (B with C)\n", "type T = A & B & C\n");
+        differs("type T = (A with B) with C\n", "type T = A & B & C\n");
+        // A class, not a type.
+        differs("val a = new A with B\n", "val a = new A & B\n");
+        // In a pattern, `&` needs parentheses.
+        let old = "x match { case y: A with B => 1; case given A with B => 2 }\n";
+        let new = "x match { case y: (A & B) => 1; case given (A & B) => 2 }\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        assert_eq!(
+            check_equivalent(
+                "x match { case y: (A with B) => 1 }\n",
+                "x match { case y: A with B => 1 }\n"
+            ),
+            Ok(())
+        );
+        differs(
+            "x match { case y: A with B => 1 }\n",
+            "x match { case y: A & B => 1 }\n",
+        );
+        differs(
+            "x match { case y: (A & B) => 1 }\n",
+            "x match { case y: A & B => 1 }\n",
+        );
+        // Other operators and parts.
+        differs("type T = A with B\n", "type T = A | B\n");
+        differs("type T = A with B\n", "type T = A & C\n");
+    }
+
+    #[test]
     fn comments_stay_on_a_rewritten_token() {
         assert_eq!(
             check_equivalent(
@@ -890,10 +1023,16 @@ mod tests {
         assert_eq!(check_equivalent(indented, hugged), Ok(()));
         assert_eq!(check_equivalent(hugged, braced), Ok(()));
         assert_eq!(
-            check_equivalent("try a\ncatch { case e: E => b }\n", "try a\ncatch case e: E => b\n"),
+            check_equivalent(
+                "try a\ncatch { case e: E => b }\n",
+                "try a\ncatch case e: E => b\n"
+            ),
             Ok(())
         );
-        differs("try a\ncatch case e: E => b\n", "try a\ncatch case f: E => b\n");
+        differs(
+            "try a\ncatch case e: E => b\n",
+            "try a\ncatch case f: E => b\n",
+        );
     }
 
     #[test]

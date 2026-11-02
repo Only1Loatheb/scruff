@@ -1,0 +1,63 @@
+# Compound types as intersection ones, `A with B` as `A & B`, where the
+# dialect allows them. The dialect is Scala 3 unless a case names another.
+
+<<< types
+val x: A with B with C = y
+def f[T <: Ordered[T] with Serializable](xs: List[A with B]): A with B = xs.head
+>>>
+val x: A & B & C = y
+def f[T <: Ordered[T] & Serializable](xs: List[A & B]): A & B = xs.head
+
+<<< self types and patterns
+trait T {
+  self: A with B =>
+  def f(x: Any) = x match {
+    case y: A with B => y
+  }
+}
+>>>
+trait T:
+  self: A & B =>
+  def f(x: Any) = x match
+    case y: (A & B) => y
+
+<<< patterns get parentheses, as in Scala 3's own rewrite
+x match {
+  case N(child: A with B with C) => 1
+  case given A with B => 2
+  case child: (A with B) => 3
+}
+>>>
+x match
+  case N(child: (A & B & C)) => 1
+  case given (A & B)         => 2
+  case child: (A & B)        => 3
+
+<<< a comment stays
+type T = A /* the first */ with B
+>>>
+type T = A /* the first */ & B
+
+<<< `new` and `extends` keep `with`
+trait T extends A with B
+val a = new A with B
+>>>
+trait T extends A with B
+val a = new A with B
+
+<<< a refinement keeps `with`
+val x: A with B { def f: Int } = y
+>>>
+val x: A with B { def f: Int } = y
+
+<<< inside an infix type, `with` stays
+type T = A with B | C
+>>>
+type T = A with B | C
+
+<<< Scala 2 with -Xsource:3 keeps `with`
+dialect = scala213source3
+===
+type T = A with B
+>>>
+type T = A with B

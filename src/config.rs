@@ -89,6 +89,9 @@ pub struct Dialect {
     /// A `using` clause for an `implicit` one: `def f(using ec: EC)` for
     /// `def f(implicit ec: EC)`. Only Scala 3's.
     pub given_using: bool,
+    /// An intersection type for a compound one: `A & B` for `A with B`.
+    /// Only Scala 3's.
+    pub and_types: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -111,6 +114,7 @@ impl Dialect {
         significant_indentation: true,
         fewer_braces: true,
         given_using: true,
+        and_types: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -134,6 +138,7 @@ impl Dialect {
             significant_indentation: scala3,
             fewer_braces: scala3,
             given_using: scala3,
+            and_types: scala3,
         })
     }
 }
@@ -813,6 +818,7 @@ mod tests {
             significant_indentation: true,
             fewer_braces: true,
             given_using: true,
+            and_types: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -823,12 +829,14 @@ mod tests {
             significant_indentation: false,
             fewer_braces: false,
             given_using: false,
+            and_types: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
             significant_indentation: false,
             fewer_braces: false,
             given_using: false,
+            and_types: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));

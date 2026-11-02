@@ -22,6 +22,19 @@
 //! not back: `using EC`, without a name, has no Scala 2 form. Callers that
 //! pass the argument explicitly must then write `f(using ec)`.
 //!
+//! A compound type becomes an intersection one: `A with B` becomes `A & B`,
+//! where the dialect allows it. Not back: in Scala 2, `&` is a type's name.
+//! In a pattern it gets parentheses, as Scala 3's own rewrite does:
+//! `case x: A with B` becomes `case x: (A & B)`, since `case x: A & B` is
+//! the pattern `x: A` and `B`. Not in a lambda's parameter, as
+//! `{ x: A with B => x }`.
+//! Not in `new A with B`, which makes a class, and not in `extends A with
+//! B`. Not where it has a refinement, as `A with B { def f: C }`: there,
+//! the refinement would go with `B` alone. And not inside an infix type, as
+//! `A with B + C`: `&` binds less tightly than `+`, and tree-sitter-scala
+//! reads infix types left to right whatever their operators, so the
+//! equivalence check couldn't tell.
+//!
 //! Only tokens change; comments and whitespace stay where they are, and
 //! code copied verbatim, such as `format: off` blocks, is left alone.
 //! `check_equivalent` treats each old form and its new one as the same.
@@ -221,6 +234,31 @@ fn edits_for(
                     }
                 }
             }
+            SyntaxKind::CompoundType if dialect.and_types && and_type(node) => {
+                // All or nothing: not where part of it is copied verbatim.
+                if node
+                    .tokens()
+                    .any(|t| !t.is_trivia() && tree.verbatim_at(t.text_range().start()).is_some())
+                {
+                    return;
+                }
+                // In a pattern, `&` needs parentheses.
+                let in_pattern = node.parent().is_some_and(|p| {
+                    matches!(
+                        p.kind(),
+                        SyntaxKind::TypedPattern | SyntaxKind::GivenPattern
+                    )
+                });
+                if let (true, Some(first), Some(last)) =
+                    (in_pattern, node.first_token(), node.last_code_token())
+                {
+                    edits.push((TextRange::empty(first.text_range().start()), "(".into()));
+                    edits.push((TextRange::empty(last.text_range().end()), ")".into()));
+                }
+                for token in tokens().filter(|t| t.text() == "with") {
+                    edits.push((token.text_range(), "&".to_string()));
+                }
+            }
             SyntaxKind::Vararg | SyntaxKind::RepeatPattern => {
                 if let Some(edit) = splice(text, node, dialect.postfix_star_vararg_splices)
                     .filter(|(range, _)| tree.verbatim_at(range.start()).is_none())
@@ -313,6 +351,35 @@ fn edits_for(
             _ => {}
         }
     }
+}
+
+/// Whether `node` is a compound type, as `A with B`, that becomes an
+/// intersection one.
+pub(super) fn and_type(node: SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::CompoundType
+        && is_plain_compound_type(node)
+        && node
+            .children_with_tokens()
+            .any(|c| c.as_token().is_some_and(|t| t.text() == "with"))
+}
+
+/// Whether a compound type, as `A with B`, means the same as `A & B`: not
+/// in `new A with B`, not with a refinement, whose braces would go with the
+/// last part alone, not inside an infix type, where `&` would bind less
+/// tightly than other operators, and not as a lambda's parameter.
+fn is_plain_compound_type(node: SyntaxNode<'_>) -> bool {
+    let refined = |n: &SyntaxNode<'_>| n.children().any(|c| c.kind() == SyntaxKind::Refinement);
+    !refined(&node)
+        && !node.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::InstanceExpression
+                    | SyntaxKind::InfixType
+                    | SyntaxKind::CompoundType
+                    | SyntaxKind::ExtendsClause
+                    | SyntaxKind::LambdaExpression
+            )
+        })
 }
 
 /// Whether a rename comes after a path and its `.`, as `c` in
@@ -1246,6 +1313,7 @@ mod tests {
         significant_indentation: false,
         fewer_braces: false,
         given_using: false,
+        and_types: false,
     };
 
     /// The rewritten text, if anything changed.
@@ -1324,6 +1392,52 @@ mod tests {
         let source3 = Dialect::named("scala213source3").unwrap();
         assert_eq!(changed("def f(implicit ec: EC) = 1\n", source3), None);
         assert_eq!(changed("def f(using ec: EC) = 1\n", OLD), None);
+    }
+
+    #[test]
+    fn compound_types_become_intersection_ones() {
+        assert_eq!(
+            rewritten("val x: A with B with C = y\n", NEW),
+            "val x: A & B & C = y\n"
+        );
+        assert_eq!(
+            rewritten(
+                "def f[T <: A with B](x: F[A with B]): A /* c */ with B = x\n",
+                NEW
+            ),
+            "def f[T <: A & B](x: F[A & B]): A /* c */ & B = x\n"
+        );
+        assert_eq!(
+            rewritten("x match { case _: A with B => 1 }\n", NEW),
+            "x match { case _: (A & B) => 1 }\n"
+        );
+        assert_eq!(
+            rewritten("x match { case given A with B => 1 }\n", NEW),
+            "x match { case given (A & B) => 1 }\n"
+        );
+        assert_eq!(
+            rewritten("x match { case y: (A with B) => 1 }\n", NEW),
+            "x match { case y: (A & B) => 1 }\n"
+        );
+        assert_eq!(
+            rewritten("type T = (A with B) => C with D\n", NEW),
+            "type T = (A & B) => C & D\n"
+        );
+        for source in [
+            "val a = new A with B\n",
+            "trait T extends A with B\n",
+            "val x: A with B { def f: Int } = y\n",
+            "type T = A with B + C\n",
+            "type T = A | B with C\n",
+            "type T = A & B\n",
+            "val f = { x: A with B => x }\n",
+        ] {
+            assert_eq!(changed(source, NEW), None, "{source}");
+        }
+        // Not in Scala 2, and not back.
+        let source3 = Dialect::named("scala213source3").unwrap();
+        assert_eq!(changed("type T = A with B\n", source3), None);
+        assert_eq!(changed("type T = A & B\n", OLD), None);
     }
 
     #[test]
@@ -1482,7 +1596,10 @@ mod tests {
         // Braces go in Scala 3, and come back in Scala 2 for a `for` over
         // several lines.
         let braced = "for {\n  x <- xs\n  y <- ys\n} yield x\n";
-        assert_eq!(rewritten(braced, NEW), "for\n  x <- xs\n  y <- ys\nyield x\n");
+        assert_eq!(
+            rewritten(braced, NEW),
+            "for\n  x <- xs\n  y <- ys\nyield x\n"
+        );
         assert_eq!(
             rewritten("for\n  x <- xs\n  y <- ys\nyield x\n", OLD),
             braced
@@ -1510,10 +1627,7 @@ mod tests {
         let changed_for = changed("for (x <- xs) x match {\n  case _ =>\n}\n", NEW);
         assert!(changed_for.is_none_or(|c| c.starts_with("for (x <- xs) x match")));
         // Written with indentation, so in full Scala 3.
-        assert_eq!(
-            changed("def f =\n  if (c)\n    a\n  end if\n", NEW),
-            None
-        );
+        assert_eq!(changed("def f =\n  if (c)\n    a\n  end if\n", NEW), None);
         // Neither `if`: the outer one would take the `else`.
         assert_eq!(changed("if (a) x = if (b) 1 else 2\n", NEW), None);
         let source3 = Dialect {

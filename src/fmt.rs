@@ -2153,6 +2153,7 @@ mod tests {
                             || !new
                                 && n.kind() == SyntaxKind::ColonArgument
                                 && rewrite::fewer_braces_back(&tree, *n).is_some()
+                            || new && rewrite::and_type(*n)
                     });
                     // Unless it's copied verbatim, as in `format: off`, or left as
                     // written because tree-sitter-scala reads it differently
