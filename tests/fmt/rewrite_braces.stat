@@ -49,10 +49,8 @@ def g =
   }
 >>>
 def f =
-  if c then
-    a
-  else
-    b
+  if c then a
+  else b
 def g =
   try
     a

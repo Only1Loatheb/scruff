@@ -232,6 +232,9 @@ struct Formatter<'t> {
     /// Where the token starts whose leading trivia a rule already printed,
     /// ahead of a group that must not contain its line break.
     leading_done: Option<TextSize>,
+    /// Where the token starts whose leading line break may be a space: a
+    /// body joining its keyword's line.
+    joining: Option<TextSize>,
     /// Where the tokens start whose trailing gap a rule prints itself, such
     /// as the line break before a `}`. Nested rules can each add one.
     trailing_skipped: Vec<TextSize>,
@@ -284,6 +287,7 @@ impl<'t> Formatter<'t> {
             next_verbatim: 0,
             copied_until: TextSize::from(0),
             leading_done: None,
+            joining: None,
             trailing_skipped: Vec::new(),
             layout,
             at_file_start: true,
@@ -311,6 +315,16 @@ impl<'t> Formatter<'t> {
     }
 
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        // A body that may join its keyword's line: laid out as ever if it
+        // breaks, with the line break before it a space if it fits.
+        if let Some(first) = self.joinable_body(node) {
+            self.joining = Some(first);
+            return self.node_framed(node).group();
+        }
+        self.node_framed(node)
+    }
+
+    fn node_framed(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         // A frame places the lines inside it from the line it starts on.
         if self.layout.frames_after_leading(node) {
             let leading = self.leading_of(node);
@@ -318,6 +332,71 @@ impl<'t> Formatter<'t> {
         } else {
             self.node_body(node)
         }
+    }
+
+    /// Where it starts, for an `if`'s `then` or `else` body that is one
+    /// expression: on the keyword's line if it fits, as `if c then a`,
+    /// `if (c) a` and `else b`, or else where it would be anyway. Not with comments around it, an
+    /// expression over several lines, or one with an `if` inside, which
+    /// could take an `else` after it; nor after a condition over several
+    /// lines, or for an `if` inside parentheses.
+    fn joinable_body(&self, node: SyntaxNode<'t>) -> Option<TextSize> {
+        if node.kind() != SyntaxKind::IndentedBlock
+            || !matches!(node.field_name(), Some("consequence" | "alternative"))
+            || node.parent()?.kind() != SyntaxKind::IfExpression
+            || !self.free_at(node.text_range().start())
+        {
+            return None;
+        }
+        let mut statements = node.non_trivia_children();
+        let (only, None) = (statements.next()?, statements.next()) else {
+            return None;
+        };
+        let name = only.kind().name();
+        let keyword =
+            std::iter::successors(node.first_token()?.prev_token(), SyntaxToken::prev_token)
+                .find(SyntaxToken::owns_trivia)?;
+        let first = first_code_token(&only)?;
+        // The condition on one line, as the `if`'s layout is decided with
+        // the body on its own; and not in parentheses, whose list is.
+        let if_expression = node.parent()?;
+        let if_line = if_expression.first_token()?.text_range().start();
+        let split_condition = keyword.text() != "else"
+            && self.has_line_break(TextRange::new(if_line, keyword.text_range().start()));
+        let in_parentheses = if_expression.ancestors().any(|a| {
+            matches!(
+                a.kind(),
+                SyntaxKind::Arguments
+                    | SyntaxKind::ParenthesizedExpression
+                    | SyntaxKind::TupleExpression
+            )
+        });
+        if split_condition || in_parentheses {
+            return None;
+        }
+        // An `if` inside could take an `else` after it.
+        let has_if = only.as_node().is_some_and(|n| {
+            n.descendants()
+                .any(|d| d.kind() == SyntaxKind::IfExpression)
+        });
+        if name.ends_with("_definition")
+            || name.ends_with("_declaration")
+            || only.kind() == SyntaxKind::ImportDeclaration
+            || has_if
+            || !only.kind().is_named()
+            || !(matches!(keyword.text(), "then" | "else")
+                || keyword.text() == ")"
+                    && keyword.parent().is_some_and(|p| {
+                        p.field_name() == Some("condition") && p.parent() == node.parent()
+                    }))
+            || keyword.trailing_trivia().any(|t| t.is_comment())
+            || first.leading_trivia().any(|t| t.is_comment())
+            || last_code_token(&only).is_none_or(|t| t.trailing_trivia().any(|c| c.is_comment()))
+            || !self.prints_on_one_line(&only)
+        {
+            return None;
+        }
+        Some(first.text_range().start())
     }
 
     fn node_body(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
@@ -691,14 +770,12 @@ impl<'t> Formatter<'t> {
         let first_call = segments.iter().position(|(_, applied)| *applied)?;
         // A colon argument before the last part breaks the chain, so one
         // call is enough then.
-        let colon_before_last = segments
-            .split_last()
-            .is_some_and(|(_, before)| {
-                before
-                    .iter()
-                    .flat_map(|(segment, _)| segment)
-                    .any(|e| e.kind() == SyntaxKind::ColonArgument)
-            });
+        let colon_before_last = segments.split_last().is_some_and(|(_, before)| {
+            before
+                .iter()
+                .flat_map(|(segment, _)| segment)
+                .any(|e| e.kind() == SyntaxKind::ColonArgument)
+        });
         if calls < 2 && !colon_before_last {
             return None;
         }
@@ -714,10 +791,14 @@ impl<'t> Formatter<'t> {
         let colon = |e: &SyntaxElement<'t>| {
             e.kind() == SyntaxKind::ColonArgument
                 || e.kind() == T![":"]
-                    && e.parent().is_some_and(|p| p.kind() == SyntaxKind::CallExpression)
+                    && e.parent()
+                        .is_some_and(|p| p.kind() == SyntaxKind::CallExpression)
         };
         let (last, before_last) = segments.split_last()?;
-        let broken = before_last.iter().flatten().any(|e| e.kind() == SyntaxKind::ColonArgument);
+        let broken = before_last
+            .iter()
+            .flatten()
+            .any(|e| e.kind() == SyntaxKind::ColonArgument);
         // Its body must be placed, or its lines would keep their widths
         // while the chain moves.
         let placed = |e: &SyntaxElement<'t>| {
@@ -725,7 +806,10 @@ impl<'t> Formatter<'t> {
                 argument
                     .children()
                     .filter(|c| {
-                        matches!(c.kind(), SyntaxKind::IndentedBlock | SyntaxKind::IndentedCases)
+                        matches!(
+                            c.kind(),
+                            SyntaxKind::IndentedBlock | SyntaxKind::IndentedCases
+                        )
                     })
                     .all(|region| self.layout.container(region).is_some())
             })
@@ -1137,7 +1221,12 @@ impl<'t> Formatter<'t> {
         let mut docs = Vec::new();
         let leading: Vec<_> = token.leading_trivia().collect();
         self.trivia_within_lines(&mut docs, &leading, Gap::LineStart, Some(&token));
-        Doc::concat(docs)
+        let doc = Doc::concat(docs);
+        if self.joining == Some(token.text_range().start()) {
+            self.joining = None;
+            return Doc::if_break(doc, Doc::text(" "));
+        }
+        doc
     }
 
     /// Drops the leading trivia of the element's first token: the line

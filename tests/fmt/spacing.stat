@@ -650,3 +650,12 @@ dialect = scala213
 val x = f(xs: _ *)
 >>>
 val x = f(xs: _*)
+
+<<< a body in parentheses after a condition keeps its space
+dialect = scala213
+===
+if (c)(a, b) else (d, e)
+while (c)(a)
+>>>
+if (c) (a, b) else (d, e)
+while (c) (a)

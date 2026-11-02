@@ -21,10 +21,8 @@ def f =
     b
 >>>
 def f =
-  if c then
-    a
-  else
-    b
+  if c then a
+  else b
 
 <<< braced bodies
 if (c) {
@@ -148,7 +146,27 @@ def f =
     c
 >>>
 def f =
-  if (a)
-    b
+  if (a) b
+  else c
+
+<<< a single expression goes on its keyword's line if it fits
+dialect = scala3
+===
+def f =
+  if c then
+    a
   else
-    c
+    b
+def g =
+  if c then
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  else
+    b
+>>>
+def f =
+  if c then a
+  else b
+def g =
+  if c then
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  else b

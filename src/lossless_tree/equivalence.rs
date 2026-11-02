@@ -200,6 +200,7 @@ fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
         },
         Some(parent)
             if is_condition_parens(&parent)
+                || is_transparent_block(&parent)
                 || is_case_body_block(&parent)
                 || is_type_wildcard_node(&parent)
                 || is_old_splice_node(&parent) =>
@@ -422,19 +423,29 @@ fn is_lone_rename_braces(node: &SyntaxNode<'_>) -> bool {
     )
 }
 
-/// A lambda body that is an indented block holding one expression means the
-/// same as the expression alone: `x =>` with `a + 1` on the next line is
-/// `x => a + 1`. tree-sitter-scala wraps only the first in a block, so the
-/// block is skipped, which lets a formatter move a body to its own line.
+/// A lambda body, or an `if`'s `then` or `else` body, that is a block
+/// holding one expression means the same as the expression alone: `x =>`
+/// with `a + 1` on the next line is `x => a + 1`, and `if c then` with `a`
+/// on the next line is `if c then a`. tree-sitter-scala wraps only the first
+/// in a block, so the block is skipped, which lets a formatter move a body
+/// to its own line or back.
 fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
-    if node.kind() != SyntaxKind::IndentedBlock
-        || !node
+    let if_body = matches!(node.field_name(), Some("consequence" | "alternative"))
+        && node
             .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression || is_colon_lambda(&p))
-    {
+            .is_some_and(|p| p.kind() == SyntaxKind::IfExpression);
+    let lambda_body = node.kind() == SyntaxKind::IndentedBlock
+        && node
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression || is_colon_lambda(&p));
+    let block = matches!(node.kind(), SyntaxKind::IndentedBlock | SyntaxKind::Block);
+    if !(block && if_body) && !lambda_body {
         return false;
     }
-    let mut children = node.non_trivia_children();
+    // Its statements: not a block's braces.
+    let mut children = node
+        .non_trivia_children()
+        .filter(|c| !matches!(c.as_token().map(|t| t.text()), Some("{" | "}")));
     match (children.next(), children.next()) {
         (Some(child), None) => {
             let name = child.kind().name();
@@ -771,6 +782,18 @@ mod tests {
         }
         differs("xs.map { x =>\n  a\n  b\n}\n", "xs.map: y =>\n  a\n  b\n");
         differs("xs.foreach {\n  a\n  b\n}\n", "xs.foreach:\n  a\nb\n");
+    }
+
+    #[test]
+    fn an_if_body_of_one_expression_means_the_expression() {
+        let braced = "if (c) {\n  a\n} else {\n  b\n}\n";
+        let indented = "if c then\n  a\nelse\n  b\n";
+        let joined = "if c then a\nelse b\n";
+        assert_eq!(check_equivalent(braced, joined), Ok(()));
+        assert_eq!(check_equivalent(indented, joined), Ok(()));
+        assert_eq!(check_equivalent(joined, braced), Ok(()));
+        // Not a definition, which a block scopes.
+        differs("if (c) {\n  val a = 1\n}\n", "if c then val a = 1\n");
     }
 
     #[test]

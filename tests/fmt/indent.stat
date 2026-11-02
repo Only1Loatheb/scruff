@@ -155,11 +155,15 @@ object A {
 }
 
 <<< a body stays indented from its `if` when a rule breaks the condition
+dialect = scala3
+===
 def f =
   if alpha && beta && gamma && delta && epsilon && zeta && eta && theta && iota && kappa && lambda then
-    one
-  else
+    one()
     two
+  else
+    three()
+    four
 >>>
 def f =
   if alpha &&
@@ -173,9 +177,11 @@ def f =
     iota &&
     kappa &&
     lambda then
-    one
-  else
+    one()
     two
+  else
+    three()
+    four
 
 <<< a block follows its `{` to the line a joined list ends on
 def f =
@@ -198,7 +204,7 @@ object A {
   def f = x match {
     case ref =>
       if (currentOwner.enclosingMethodOrClassOrObject.isProperlyContainedIn(refSym.enclosingMethodOrClassOrObject.fooooo))
-        report.error(pos)
+        report.error(em"Separation failure: a description of the failure, sized to fit on its", pos)
   }
 }
 >>>
@@ -208,6 +214,6 @@ object A {
       if (currentOwner.enclosingMethodOrClassOrObject.isProperlyContainedIn(
         refSym.enclosingMethodOrClassOrObject.fooooo
       ))
-        report.error(pos)
+        report.error(em"Separation failure: a description of the failure, sized to fit on its", pos)
   }
 }

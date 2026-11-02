@@ -137,6 +137,26 @@ fn applies_to(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     }) {
         return false;
     }
+    // A condition, as in `if (c) (a, b)`, or a `for`'s enumerators, aren't
+    // applied to the body after them.
+    if a.text() == ")"
+        && a.parent().is_some_and(|p| {
+            let control = |n: &SyntaxNode<'_>| {
+                matches!(
+                    n.kind(),
+                    SyntaxKind::IfExpression
+                        | SyntaxKind::WhileExpression
+                        | SyntaxKind::ForExpression
+                )
+            };
+            (p.kind() == SyntaxKind::ParenthesizedExpression
+                && p.field_name() == Some("condition")
+                && p.parent().is_some_and(|g| control(&g)))
+                || (control(&p) && a.field_name() == Some("enumerators"))
+        })
+    {
+        return false;
+    }
     // An infix operator, as in `xs map (f)`, doesn't apply to what follows.
     if a.field_name() == Some("operator") {
         return false;
