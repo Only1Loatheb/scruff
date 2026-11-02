@@ -172,11 +172,12 @@ export scanUnit.scan
 
 <<< rename (scala3/Export.stat:10)
 maxColumn = 80
-# Expected output changed to sbt's style, spaces inside import braces.
+# Expected output changed to sbt's style, spaces inside import braces, and
+# to Scala 3's `as` and `*`, the dialect's new syntax.
 ===
 export   printUnit.  {status  => _, _}
 >>>
-export printUnit.{ status => _, _ }
+export printUnit.{ status as _, * }
 
 
 <<< simple polymorphic function (scala3/PolyFunction.stat:2)

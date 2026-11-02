@@ -1,0 +1,87 @@
+# Imports in the new syntax the dialect allows: `*` for `_`, and `as` for
+# `=>` in renames, in imports and exports alike. The dialect is Scala 3
+# unless a case names another; in one without the new syntax, nothing
+# changes.
+
+<<< a wildcard
+import a._
+import a.b.{c, _}
+>>>
+import a.*
+import a.b.{ c, * }
+
+<<< renames and hiding
+import a.{b => c, d => _, _}
+>>>
+import a.{ b as c, d as _, * }
+
+<<< a rename written without spaces
+import a.{b=>c}
+>>>
+import a.{ b as c }
+
+<<< exports
+export a._
+>>>
+export a.*
+
+<<< imports inside a template
+object A {
+  import b.c._
+  def f = { import d._; 1 }
+}
+>>>
+object A {
+  import b.c.*
+  def f = { import d.*; 1 }
+}
+
+<<< comments stay where they are
+import a.{b /* x */ => c} // y
+>>>
+import a.{ b /* x */ as c } // y
+
+<<< what isn't an import stays
+val f = (_: Int) + 1
+import a.`_`
+import a.given
+>>>
+val f = (_: Int) + 1
+import a.`_`
+import a.given
+
+<<< format: off is left alone
+// format: off
+import a._
+// format: on
+import b._
+>>>
+// format: off
+import a._
+// format: on
+import b.*
+
+<<< Scala 2 with -Xsource:3 has the new syntax
+dialect = scala213source3
+===
+import a.{b => c, _}
+>>>
+import a.{ b as c, * }
+
+<<< plain Scala 2.13 doesn't
+dialect = scala213
+===
+import a.{b => c, _}
+>>>
+import a.{ b => c, _ }
+
+<<< plain Scala 2.13 gets its own syntax back
+dialect = scala213
+===
+import a.*
+import a.{b as c, d as _, *}
+import a.b as c, d.e as _
+>>>
+import a._
+import a.{ b => c, d => _, _ }
+import a.{ b => c }, d.{ e => _ }

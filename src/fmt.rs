@@ -5,8 +5,10 @@ use std::fmt;
 use crate::T;
 
 mod indent;
+mod rewrite;
 mod spacing;
 
+use crate::config::Dialect;
 use crate::doc::{AlignPart, Doc, PrintOptions, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
@@ -20,11 +22,17 @@ use crate::lossless_tree::{
 pub struct FormatOptions {
     /// Defaults to 100, sbt's scalafmt `maxColumn`.
     pub max_width: usize,
+    /// The code's Scala dialect, whose new syntax scuff rewrites to.
+    /// Defaults to Scala 3.
+    pub dialect: Dialect,
 }
 
 impl Default for FormatOptions {
     fn default() -> Self {
-        FormatOptions { max_width: 100 }
+        FormatOptions {
+            max_width: 100,
+            dialect: Dialect::SCALA3,
+        }
     }
 }
 
@@ -106,6 +114,12 @@ fn format_with(
     if !tree.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
     }
+    // Rewritten to the dialect's syntax first, unless the result doesn't
+    // parse cleanly. The result is still checked against `source`.
+    let tree = rewrite::rewrite(&tree, options.dialect)
+        .map(|text| parse(&text))
+        .filter(|rewritten| rewritten.errors().is_empty())
+        .unwrap_or(tree);
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
@@ -1656,20 +1670,95 @@ mod tests {
             .unwrap();
     }
 
+    /// Corpus files the formatter correctly refuses because tree-sitter-scala
+    /// parses the formatted code differently, with the reason.
+    const KNOWN_REFUSALS: &[(&str, &str)] = &[(
+        "scala3/tests/neg/binaryLiterals.scala",
+        "the invalid literal `0b` reads as `0` and a name `b`; the space \
+         between them makes `b` an operator ending its line, continued by \
+         the `0b2` below",
+    )];
+
+    /// Rewrites the imports of every error-free file in the corpus to Scala
+    /// 3's syntax and to Scala 2.13's, checking that each result is
+    /// equivalent, stable when formatted again, and has none of the other
+    /// syntax left. Run with:
+    /// `cargo test --release corpus_rewrites -- --ignored --nocapture`
+    #[test]
+    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    fn corpus_rewrites_imports() {
+        use crate::config::Dialect;
+        let files = crate::lossless_tree::corpus::corpus_files();
+        let mut failures = Vec::new();
+        for (name, new) in [("scala3", true), ("scala213", false)] {
+            let dialect = Dialect::named(name).unwrap();
+            let options = FormatOptions {
+                dialect,
+                ..FormatOptions::default()
+            };
+            let mut rewritten = 0;
+            for path in &files {
+                let Ok(source) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let tree = parse(&source);
+                if !tree.errors().is_empty()
+                    || KNOWN_REFUSALS.iter().any(|(file, _)| path.ends_with(file))
+                {
+                    continue;
+                }
+                rewritten += usize::from(rewrite::rewrite(&tree, dialect).is_some());
+                let out = match format(&source, &options) {
+                    Ok(out) => out,
+                    Err(e) => {
+                        failures.push(format!("{name}: {}: {e}", path.display()));
+                        continue;
+                    }
+                };
+                if format(&out, &options).as_deref() != Ok(out.as_str()) {
+                    failures.push(format!("{name}: {}: not idempotent", path.display()));
+                }
+                let tree = parse(&out);
+                let other = tree.syntax().descendants().find(|n| {
+                    let wildcard = if new { "_" } else { "*" };
+                    let rename = if new {
+                        SyntaxKind::ArrowRenamedIdentifier
+                    } else {
+                        SyntaxKind::AsRenamedIdentifier
+                    };
+                    // `import foo as f` has no Scala 2 form.
+                    n.kind() == rename && (new || rewrite::after_a_path(*n))
+                        || n.kind() == SyntaxKind::NamespaceWildcard && n.text() == wildcard
+                });
+                // Unless it's copied verbatim, as in `format: off`.
+                if let Some(node) =
+                    other.filter(|n| tree.verbatim_at(n.text_range().start()).is_none())
+                {
+                    let (line, col) = tree.line_col(node.text_range().start());
+                    failures.push(format!(
+                        "{name}: {}:{line}:{col}: other syntax left",
+                        path.display()
+                    ));
+                }
+            }
+            println!(
+                "{name}: {} files, {rewritten} with imports rewritten",
+                files.len()
+            );
+        }
+        for failure in failures.iter().take(15) {
+            println!("{failure}");
+        }
+        println!("{} failed", failures.len());
+        assert!(failures.is_empty());
+    }
+
     /// Formats every error-free file in the corpus, checking that each
     /// result is equivalent and is stable when formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
     #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
     fn corpus_formats_every_file() {
-        // Files the formatter correctly refuses because tree-sitter-scala
-        // parses the formatted code differently, with the reason.
-        const KNOWN_REFUSALS: &[(&str, &str)] = &[(
-            "scala3/tests/neg/binaryLiterals.scala",
-            "the invalid literal `0b` reads as `0` and a name `b`; the space \
-             between them makes `b` an operator ending its line, continued by \
-             the `0b2` below",
-        )];
         let files = crate::lossless_tree::corpus::corpus_files();
         let mut refused = 0;
         let (mut formatted, mut changed, mut skipped, mut failures) = (0, 0, 0, Vec::new());
@@ -1723,6 +1812,7 @@ mod tests {
     fn rules_disagree(source: &str) -> Option<String> {
         let options = FormatOptions {
             max_width: 1_000_000,
+            ..FormatOptions::default()
         };
         let joined = format_with(source, &options, Rules::Structural, STYLE);
         let source = joined.as_deref().unwrap_or(source);
@@ -1809,10 +1899,12 @@ mod tests {
     #[ignore = "slow; reports differences from scalafmt over modules/sbt"]
     fn corpus_sbt_differences_from_scalafmt() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("modules/sbt");
-        // The files sbt's `.scalafmt.conf` formats, at its width.
+        // The files sbt's `.scalafmt.conf` formats, at its width and in its
+        // dialects.
         let config = crate::config::Config::load(&root.join(crate::config::SCALAFMT_FILE)).unwrap();
-        let options = FormatOptions {
+        let options = |file: &std::path::Path| FormatOptions {
             max_width: config.max_column,
+            dialect: config.dialect_for(Some(file)),
         };
         let files: Vec<_> = crate::lossless_tree::corpus::corpus_files()
             .into_iter()
@@ -1826,7 +1918,7 @@ mod tests {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            let Ok(out) = format(&source, &options) else {
+            let Ok(out) = format(&source, &options(path)) else {
                 continue;
             };
             if out != source {

@@ -22,6 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
+use scuff::config::Dialect;
 use scuff::fmt::{FormatError, FormatOptions, format};
 
 struct Case {
@@ -45,7 +46,7 @@ enum Marker {
 const DOES_NOT_PARSE: &str = "test does not parse";
 
 /// Applies `key = value` settings. The formatter has almost no options, so
-/// anything but `maxColumn` is a mistake in the test file.
+/// anything but `maxColumn` and `dialect` is a mistake in the test file.
 fn apply_settings(options: &mut FormatOptions, lines: &[&str], file: &Path, first_line: usize) {
     for (i, line) in lines.iter().enumerate() {
         let at = format!("{}:{}", file.display(), first_line + i);
@@ -62,7 +63,13 @@ fn apply_settings(options: &mut FormatOptions, lines: &[&str], file: &Path, firs
                     .parse()
                     .unwrap_or_else(|_| panic!("{at}: maxColumn must be a number"));
             }
-            other => panic!("{at}: unknown setting {other:?}; the only setting is maxColumn"),
+            "dialect" => {
+                options.dialect = Dialect::named(value.trim())
+                    .unwrap_or_else(|| panic!("{at}: unknown dialect {value:?}"));
+            }
+            other => {
+                panic!("{at}: unknown setting {other:?}; the settings are maxColumn and dialect")
+            }
         }
     }
 }

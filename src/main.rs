@@ -266,11 +266,14 @@ fn directory_of(file: &Path) -> PathBuf {
     }
 }
 
-/// The options for files under `config`, or scuff's own without one.
-fn options(config: Option<&Config>) -> fmt::FormatOptions {
+/// The options for `file` under `config`, or scuff's own without one. With
+/// no file, as for standard input, the dialect is the one no `fileOverride`
+/// pattern changes.
+fn options(config: Option<&Config>, file: Option<&Path>) -> fmt::FormatOptions {
     match config {
         Some(config) => fmt::FormatOptions {
             max_width: config.max_column,
+            dialect: config.dialect_for(file),
         },
         None => fmt::FormatOptions::default(),
     }
@@ -282,7 +285,7 @@ fn format_file(file: &Path, config: Option<&Config>, check: bool) -> Outcome {
         Ok(source) => source,
         Err(err) => return Outcome::error(format!("error: can't read {name}: {err}")),
     };
-    match fmt::format(&source, &options(config)) {
+    match fmt::format(&source, &options(config, Some(file))) {
         Ok(formatted) if formatted == source => Outcome::default(),
         Ok(_) if check => Outcome {
             code: 1,
@@ -315,7 +318,7 @@ fn format_stdin(check: bool) -> ExitCode {
         Ok(input) => input,
         Err(code) => return code,
     };
-    match fmt::format(&source, &options(config.as_ref())) {
+    match fmt::format(&source, &options(config.as_ref(), None)) {
         Ok(formatted) if check => {
             if formatted == source {
                 ExitCode::SUCCESS

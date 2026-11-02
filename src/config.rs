@@ -7,6 +7,10 @@
 //! `.scuff.toml` has these keys:
 //!
 //! - `max-column`, 100 by default.
+//! - `dialect`, the Scala dialect, by scalafmt's names: `scala3`,
+//!   `scala213source3`, `scala212source3`, `scala213` or `sbt1`; `scala3`
+//!   by default. scuff rewrites code to the new
+//!   syntax it allows.
 //! - `include-paths` and `exclude-paths`: `glob:` or `regex:` patterns, in
 //!   the syntax of Java's `PathMatcher`, which must match a file's whole
 //!   absolute path. Include paths default to `.scala`, `.sbt`, `.sc` and
@@ -21,6 +25,10 @@
 //! - `project.includeFilters` and `project.excludeFilters`, their older
 //!   form: regexes that must match somewhere in the path. Include filters
 //!   replace the default include paths unless those are set as well.
+//! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`
+//!   and `allowAsForImportRename`, also under `fileOverride`, whose patterns
+//!   are tried longest first, as in scalafmt. The dialect is `scala3` when
+//!   none is named.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -49,6 +57,117 @@ pub struct Config {
     /// Directories whose every file is excluded, from `glob:.../X/**`
     /// exclude paths, matched as `glob:.../X`.
     exclude_dirs: Vec<Matcher>,
+    /// The dialect of files no override matches.
+    dialect: Dialect,
+    /// Dialects for the files a pattern matches, the first match winning.
+    dialect_overrides: Vec<(Matcher, Dialect)>,
+}
+
+/// What new syntax a Scala dialect allows, which decides what scuff
+/// rewrites to it. Named after scalameta's dialect flags.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dialect {
+    /// `import a.*` for `import a._`.
+    pub star_wildcard_import: bool,
+    /// `import a.{b as c}` for `import a.{b => c}`.
+    pub as_for_import_rename: bool,
+}
+
+/// The dialects scuff knows, by scalafmt's names.
+const DIALECTS: [&str; 5] = [
+    "scala3",
+    "scala213source3",
+    "scala212source3",
+    "scala213",
+    "sbt1",
+];
+
+impl Dialect {
+    /// Scala 3, scuff's dialect when none is named.
+    pub const SCALA3: Dialect = Dialect {
+        star_wildcard_import: true,
+        as_for_import_rename: true,
+    };
+
+    /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
+    /// `scala213source3` or `scala212source3` (Scala 2 with `-Xsource:3`),
+    /// `sbt1` (sbt 1's build files, which allow the same), or `scala213`.
+    pub fn named(name: &str) -> Option<Dialect> {
+        // Scala 3's imports are in Scala 2 with `-Xsource:3` too.
+        let new_syntax = match name.to_ascii_lowercase().as_str() {
+            "scala3" | "scala213source3" | "scala212source3" | "sbt1" => true,
+            "scala213" => false,
+            _ => return None,
+        };
+        Some(Dialect {
+            star_wildcard_import: new_syntax,
+            as_for_import_rename: new_syntax,
+        })
+    }
+}
+
+/// A dialect as a configuration gives it, before it's resolved: a name and
+/// flags that override the named dialect's.
+#[derive(Clone, Debug, Default)]
+struct DialectSetting {
+    name: Option<String>,
+    star_wildcard_import: Option<bool>,
+    as_for_import_rename: Option<bool>,
+}
+
+impl DialectSetting {
+    /// The dialect: Scala 3 without a name.
+    fn resolve(&self) -> Result<Dialect, String> {
+        let name = self.name.as_deref().unwrap_or("scala3");
+        let mut dialect = Dialect::named(name).ok_or_else(|| {
+            format!(
+                "unknown dialect {name:?}; the dialects are {}",
+                DIALECTS.join(", ")
+            )
+        })?;
+        if let Some(allow) = self.star_wildcard_import {
+            dialect.star_wildcard_import = allow;
+        }
+        if let Some(allow) = self.as_for_import_rename {
+            dialect.as_for_import_rename = allow;
+        }
+        Ok(dialect)
+    }
+
+    /// This setting with what `runner` sets, an object holding `dialect`
+    /// and `dialectOverride`.
+    fn with_runner(&self, runner: &hocon::HoconValue) -> Result<DialectSetting, String> {
+        let mut setting = self.clone();
+        let Some(runner) = runner.as_object() else {
+            return Err("runner must be an object".into());
+        };
+        if let Some(name) = runner.get("dialect") {
+            setting.name = Some(
+                name.as_str()
+                    .ok_or("runner.dialect must be a dialect's name")?
+                    .to_string(),
+            );
+        }
+        if let Some(overrides) = runner.get("dialectOverride").and_then(|o| o.as_object()) {
+            let flag = |key: &str| -> Result<Option<bool>, String> {
+                overrides
+                    .get(key)
+                    .map(|v| {
+                        v.as_bool().ok_or_else(|| {
+                            format!("runner.dialectOverride.{key} must be true or false")
+                        })
+                    })
+                    .transpose()
+            };
+            if let Some(allow) = flag("allowStarWildcardImport")? {
+                setting.star_wildcard_import = Some(allow);
+            }
+            if let Some(allow) = flag("allowAsForImportRename")? {
+                setting.as_for_import_rename = Some(allow);
+            }
+        }
+        Ok(setting)
+    }
 }
 
 #[derive(Debug)]
@@ -128,6 +247,7 @@ impl Config {
     fn from_toml(path: &Path, table: &toml::Table) -> Result<Config, String> {
         let mut max_column = crate::fmt::FormatOptions::default().max_width;
         let mut patterns = Patterns::default();
+        let mut dialect = DialectSetting::default();
         for (key, value) in table {
             let strings = || -> Result<Vec<String>, String> {
                 let message = || format!("{key} must be a list of strings");
@@ -148,15 +268,25 @@ impl Config {
                 }
                 "include-paths" => patterns.include_paths = Some(strings()?),
                 "exclude-paths" => patterns.exclude_paths = strings()?,
+                "dialect" => {
+                    dialect.name = Some(
+                        value
+                            .as_str()
+                            .ok_or("dialect must be a dialect's name")?
+                            .to_string(),
+                    );
+                }
                 _ => {
                     return Err(format!(
-                        "unknown key {key:?}; the keys are max-column, include-paths and \
-                         exclude-paths"
+                        "unknown key {key:?}; the keys are max-column, dialect, include-paths \
+                         and exclude-paths"
                     ));
                 }
             }
         }
-        Config::new(path, max_column, patterns)
+        let mut config = Config::new(path, max_column, patterns)?;
+        config.dialect = dialect.resolve()?;
+        Ok(config)
     }
 
     fn from_hocon(path: &Path, config: &hocon::Config) -> Result<Config, String> {
@@ -193,7 +323,48 @@ impl Config {
             exclude_paths: strings("project.excludePaths")?,
             exclude_filters: strings("project.excludeFilters")?,
         };
-        Config::new(path, max_column, patterns)
+        let mut result = Config::new(path, max_column, patterns)?;
+
+        let base = match config.get("runner") {
+            Some(runner) => DialectSetting::default().with_runner(runner)?,
+            None => DialectSetting::default(),
+        };
+        result.dialect = base.resolve()?;
+        // `fileOverride`: each pattern's settings over the file's, the
+        // longest pattern first, as in scalafmt.
+        if let Some(overrides) = config.get("fileOverride") {
+            let overrides = overrides
+                .as_object()
+                .ok_or("fileOverride must be an object")?;
+            let mut keys: Vec<_> = overrides.keys().filter(|k| !k.is_empty()).collect();
+            keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+            for key in keys {
+                // Languages need scalafmt's project layout, which scuff
+                // doesn't read.
+                if key.starts_with("lang:") {
+                    continue;
+                }
+                let setting = match &overrides[key.as_str()] {
+                    value if value.as_str().is_some() => DialectSetting {
+                        name: value.as_str().map(str::to_string),
+                        ..base.clone()
+                    },
+                    value => match value.as_object().and_then(|o| o.get("runner")) {
+                        Some(runner) => base.with_runner(runner)?,
+                        None => base.clone(),
+                    },
+                };
+                // `.sbt` stands for every file with that extension.
+                let pattern = match key.strip_prefix('.') {
+                    Some(_) => format!("glob:**{key}"),
+                    None => key.clone(),
+                };
+                result
+                    .dialect_overrides
+                    .push((Matcher::path(&pattern)?, setting.resolve()?));
+            }
+        }
+        Ok(result)
     }
 
     fn new(path: &Path, max_column: usize, patterns: Patterns) -> Result<Config, String> {
@@ -235,7 +406,26 @@ impl Config {
             include,
             exclude,
             exclude_dirs,
+            dialect: Dialect::SCALA3,
+            dialect_overrides: Vec::new(),
         })
+    }
+
+    /// The dialect of `file`, or of files no `fileOverride` pattern matches
+    /// when there's none, as for standard input.
+    pub fn dialect_for(&self, file: Option<&Path>) -> Dialect {
+        if let Some(file) = file {
+            let path = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
+            let path = path.to_string_lossy();
+            if let Some((_, dialect)) = self
+                .dialect_overrides
+                .iter()
+                .find(|(m, _)| m.0.is_match(&path))
+            {
+                return *dialect;
+            }
+        }
+        self.dialect
     }
 
     /// Whether every file under `dir` is excluded, so a walk can skip it: a
@@ -610,6 +800,78 @@ mod tests {
     }
 
     #[test]
+    fn dialects() {
+        let new = Dialect {
+            star_wildcard_import: true,
+            as_for_import_rename: true,
+        };
+        let old = Dialect {
+            star_wildcard_import: false,
+            as_for_import_rename: false,
+        };
+        assert_eq!(Dialect::named("scala3"), Some(new));
+        assert_eq!(Dialect::named("Scala213Source3"), Some(new));
+        assert_eq!(Dialect::named("scala212source3"), Some(new));
+        assert_eq!(Dialect::named("scala213"), Some(old));
+        assert_eq!(Dialect::named("sbt1"), Some(new));
+        // Only these five.
+        for other in ["scala33", "scala212", "sbt0137", "scala4"] {
+            assert_eq!(Dialect::named(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn scalafmt_dialects() {
+        let file = |p: &str| Some(PathBuf::from(p));
+        // Scala 3 without a dialect.
+        assert_eq!(
+            config("").dialect_for(file("/p/A.scala").as_deref()),
+            Dialect::SCALA3
+        );
+        let c = config(
+            r#"
+            runner.dialect = scala3
+            runner.dialectOverride.allowAsForImportRename = false
+            fileOverride {
+              "glob:**/scala-2/**" { runner.dialect = scala213 }
+              "glob:**/src/main/scala-2/**" = scala213source3
+              ".sbt" { runner.dialectOverride.allowStarWildcardImport = false }
+            }
+            "#,
+        );
+        let dialect = |p: &str| c.dialect_for(file(p).as_deref());
+        let base = dialect("/p/src/A.scala");
+        assert!(base.star_wildcard_import && !base.as_for_import_rename);
+        // The longest matching pattern wins; a dialect's name alone keeps
+        // the overrides around it.
+        let longest = dialect("/p/src/main/scala-2/A.scala");
+        assert!(longest.star_wildcard_import && !longest.as_for_import_rename);
+        assert!(!dialect("/p/src/test/scala-2/A.scala").star_wildcard_import);
+        assert!(!dialect("/p/build.sbt").star_wildcard_import);
+        // With no file, the dialect no pattern changes.
+        assert_eq!(c.dialect_for(None), base);
+    }
+
+    #[test]
+    fn dialect_errors() {
+        let message = |text| Config::parse(Path::new("x"), text).unwrap_err().message;
+        assert!(message("runner.dialect = scala4").contains("unknown dialect"));
+        assert!(message("fileOverride { \".sbt\" = scala4 }").contains("unknown dialect"));
+        assert!(
+            message("runner.dialect = scala3\nrunner.dialectOverride.allowStarWildcardImport = 1")
+                .contains("true or false")
+        );
+    }
+
+    #[test]
+    fn scuff_toml_dialect() {
+        let c = scuff_config("dialect = \"scala213\"").unwrap();
+        assert!(!c.dialect_for(None).star_wildcard_import);
+        assert_eq!(scuff_config("").unwrap().dialect_for(None), Dialect::SCALA3);
+        assert!(scuff_config("dialect = \"scala4\"").is_err());
+    }
+
+    #[test]
     fn patterns_need_a_kind() {
         let err = Config::parse(Path::new("x"), r#"project.excludePaths = ["**/gen/**"]"#);
         assert!(err.unwrap_err().message.contains("prefix"));
@@ -629,6 +891,17 @@ mod tests {
             let config = Config::load(&path).unwrap();
             let expected = if project == "sbt" { 100 } else { 120 };
             assert_eq!(config.max_column, expected, "{project}");
+        }
+        let cats = root.join("cats");
+        if cats.join(SCALAFMT_FILE).is_file() {
+            let config = Config::load(&cats.join(SCALAFMT_FILE)).unwrap();
+            let dialect = |p: &str| config.dialect_for(Some(&cats.join(p)));
+            // `as` is turned off everywhere, `*` allowed everywhere.
+            let main = dialect("core/src/main/scala/cats/Functor.scala");
+            assert!(main.star_wildcard_import && !main.as_for_import_rename);
+            assert_eq!(dialect("core/src/main/scala-2.12/cats/A.scala"), main);
+            assert_eq!(dialect("core/src/test/scala-3/cats/A.scala"), main);
+            assert_eq!(dialect("build.sbt"), main);
         }
         if found > 0 {
             let sbt = Config::load(&root.join("sbt").join(SCALAFMT_FILE)).unwrap();

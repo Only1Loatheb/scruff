@@ -12,7 +12,10 @@
 //!    same token in the same position (leading, trailing, or end of file).
 //!
 //! A trailing comma, one followed by a line break and then `)` or `]`, may
-//! be added or removed: it means nothing.
+//! be added or removed: it means nothing. And a dialect's new syntax means
+//! the same as the old: `import a.*` as `import a._`, `b as c` as `b => c`
+//! in an import or export, and braces around a lone rename mean nothing,
+//! `import a.b as c` as `import a.{b => c}`.
 
 use std::fmt;
 
@@ -101,6 +104,28 @@ fn check_errors(before: &Tree, after: &Tree) -> Result<(), Difference> {
 // ---------------------------------------------------------------------------
 // Code shape.
 
+/// A node's kind in a dialect's new syntax: an `=>` rename is an `as` one.
+fn new_kind(kind: SyntaxKind) -> SyntaxKind {
+    match kind {
+        SyntaxKind::ArrowRenamedIdentifier => SyntaxKind::AsRenamedIdentifier,
+        kind => kind,
+    }
+}
+
+/// A token's text in a dialect's new syntax: `*` for an import's `_`, `as`
+/// for a rename's `=>`. Its kind changes with its text, so the text stands
+/// for both.
+fn new_token<'t>(token: &SyntaxToken<'t>) -> (Option<SyntaxKind>, &'t str) {
+    let parent = token.parent().map(|p| p.kind());
+    match (parent, token.text()) {
+        (Some(SyntaxKind::NamespaceWildcard), "_") => (None, "*"),
+        (Some(SyntaxKind::ArrowRenamedIdentifier), "=>" | "\u{21D2}") => (None, "as"),
+        (Some(SyntaxKind::NamespaceWildcard), "*")
+        | (Some(SyntaxKind::AsRenamedIdentifier), "as") => (None, token.text()),
+        (_, text) => (Some(token.kind()), text),
+    }
+}
+
 /// One step of a walk over the code, with trivia left out.
 #[derive(Clone, Copy)]
 enum Step<'t> {
@@ -113,12 +138,11 @@ impl Step<'_> {
     fn same_as(&self, other: &Step<'_>) -> bool {
         match (self, other) {
             (Step::Enter(a), Step::Enter(b)) => {
-                a.kind() == b.kind() && a.field_name() == b.field_name()
+                new_kind(a.kind()) == new_kind(b.kind()) && a.field_name() == b.field_name()
             }
-            (Step::Leave(a), Step::Leave(b)) => a.kind() == b.kind(),
+            (Step::Leave(a), Step::Leave(b)) => new_kind(a.kind()) == new_kind(b.kind()),
             (Step::Token(a), Step::Token(b)) => {
-                a.kind() == b.kind()
-                    && a.text() == b.text()
+                new_token(a) == new_token(b)
                     && a.is_missing() == b.is_missing()
                     && a.field_name() == b.field_name()
             }
@@ -157,16 +181,34 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
     root.preorder_with_tokens().filter_map(|event| match event {
         WalkEvent::Enter(element) | WalkEvent::Leave(element) if element.is_trivia() => None,
         WalkEvent::Enter(NodeOrToken::Node(node)) | WalkEvent::Leave(NodeOrToken::Node(node))
-            if is_transparent_block(&node) =>
+            if is_transparent_block(&node) || is_lone_rename_braces(&node) =>
         {
             None
         }
+        WalkEvent::Enter(NodeOrToken::Token(token)) if is_lone_rename_brace(&token) => None,
         WalkEvent::Enter(NodeOrToken::Node(node)) => Some(Step::Enter(node)),
         WalkEvent::Leave(NodeOrToken::Node(node)) => Some(Step::Leave(node)),
         WalkEvent::Enter(NodeOrToken::Token(token)) if is_trailing_comma(&token) => None,
         WalkEvent::Enter(NodeOrToken::Token(token)) => Some(Step::Token(token)),
         WalkEvent::Leave(NodeOrToken::Token(_)) => None,
     })
+}
+
+/// Braces around a lone rename in an import or export, as in
+/// `import a.{b => c}`, which mean the same as `import a.b as c`.
+fn is_lone_rename_braces(node: &SyntaxNode<'_>) -> bool {
+    if node.kind() != SyntaxKind::NamespaceSelectors {
+        return false;
+    }
+    let mut children = node.non_trivia_children();
+    matches!(
+        (children.next(), children.next(), children.next(), children.next()),
+        (Some(_), Some(rename), Some(_), None)
+            if matches!(
+                rename.kind(),
+                SyntaxKind::ArrowRenamedIdentifier | SyntaxKind::AsRenamedIdentifier
+            )
+    )
 }
 
 /// A lambda body that is an indented block holding one expression means the
@@ -265,27 +307,49 @@ impl Comment<'_> {
 
 fn comments(parse: &Tree) -> Vec<Comment<'_>> {
     let mut out = Vec::new();
-    let owners = parse
-        .syntax()
-        .tokens()
-        .filter(|t| t.owns_trivia() && !is_trailing_comma(t));
-    for (index, token) in owners.enumerate() {
-        let owner = Some((index, token.text()));
-        for (placement, trivia) in token
-            .leading_trivia()
-            .map(|t| (Placement::Leading, t))
-            .chain(token.trailing_trivia().map(|t| (Placement::Trailing, t)))
-        {
-            if trivia.is_comment() {
+    // Tokens that may come or go don't own comments: a comment before one
+    // goes with the next token, a comment after it with the one before.
+    let mut index = 0;
+    let mut previous = None;
+    let mut before_next = Vec::new();
+    for token in parse.syntax().tokens().filter(SyntaxToken::owns_trivia) {
+        if is_trailing_comma(&token) || is_lone_rename_brace(&token) {
+            before_next.extend(token.leading_trivia().filter(SyntaxTrivia::is_comment));
+            for trivia in token.trailing_trivia().filter(SyntaxTrivia::is_comment) {
                 out.push(Comment {
                     trivia,
-                    placement,
-                    owner,
+                    placement: Placement::Trailing,
+                    owner: previous,
                 });
             }
+            continue;
         }
+        let owner = Some((index, token.text()));
+        let leading: Vec<_> = before_next
+            .drain(..)
+            .chain(token.leading_trivia().filter(SyntaxTrivia::is_comment))
+            .collect();
+        for trivia in leading {
+            out.push(Comment {
+                trivia,
+                placement: Placement::Leading,
+                owner,
+            });
+        }
+        for trivia in token.trailing_trivia().filter(SyntaxTrivia::is_comment) {
+            out.push(Comment {
+                trivia,
+                placement: Placement::Trailing,
+                owner,
+            });
+        }
+        previous = owner;
+        index += 1;
     }
-    for trivia in parse.eof_trivia().filter(SyntaxTrivia::is_comment) {
+    for trivia in before_next
+        .into_iter()
+        .chain(parse.eof_trivia().filter(SyntaxTrivia::is_comment))
+    {
         out.push(Comment {
             trivia,
             placement: Placement::EndOfFile,
@@ -293,6 +357,11 @@ fn comments(parse: &Tree) -> Vec<Comment<'_>> {
         });
     }
     out
+}
+
+/// A `{` or `}` around a lone rename, which may come or go.
+fn is_lone_rename_brace(token: &SyntaxToken<'_>) -> bool {
+    matches!(token.text(), "{" | "}") && token.parent().is_some_and(|p| is_lone_rename_braces(&p))
 }
 
 /// Whether two comments say the same. The indentation of a comment's lines
@@ -351,6 +420,46 @@ mod tests {
 
     fn differs(before: &str, after: &str) -> Difference {
         check_equivalent(before, after).expect_err("should differ")
+    }
+
+    #[test]
+    fn new_import_syntax_means_the_same() {
+        let old = "import a._\nimport a.{b => c, d => _, _}\nexport e._\n";
+        let new = "import a.*\nimport a.{b as c, d as _, *}\nexport e.*\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+    }
+
+    #[test]
+    fn braces_around_a_lone_rename_mean_nothing() {
+        assert_eq!(
+            check_equivalent("import a.b as c\n", "import a.{b => c}\n"),
+            Ok(())
+        );
+        assert_eq!(
+            check_equivalent("import a.{b => c}\n", "import a.b as c\n"),
+            Ok(())
+        );
+        differs("import a.{b => c, d}\n", "import a.b as c\n");
+    }
+
+    #[test]
+    fn comments_stay_with_their_token_when_braces_come() {
+        assert_eq!(
+            check_equivalent(
+                "import a.b as c // x\nval y = 1 // y\n",
+                "import a.{b => c} // x\nval y = 1 // y\n"
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn new_import_syntax_still_compares_names() {
+        differs("import a._\n", "import b.*\n");
+        differs("import a.{b => c}\n", "import a.{b as d}\n");
+        // Only in imports: a `*` elsewhere is a different name.
+        differs("val x = a _\n", "val x = a *\n");
     }
 
     #[test]

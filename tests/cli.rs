@@ -330,3 +330,47 @@ fn a_file_and_a_link_to_it_are_formatted_once() {
     let out = scuff_in(&dir, &["format", "--check", "."], "");
     assert_eq!(text(&out.stderr), "./src/A.scala: would be reformatted\n");
 }
+
+#[test]
+fn imports_are_rewritten_to_what_the_dialect_allows() {
+    let dir = repository(
+        "rewrite",
+        &[
+            (
+                ".scalafmt.conf",
+                "runner.dialect = scala3\nfileOverride { \".sbt\" = scala213 }\n",
+            ),
+            ("A.scala", "import a._\nimport b.{c => d}\n"),
+            ("build.sbt", "import a._\n"),
+        ],
+    );
+    let out = scuff_in(&dir, &["format", "."], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(read(&dir, "A.scala"), "import a.*\nimport b.{ c as d }\n");
+    assert_eq!(read(&dir, "build.sbt"), "import a._\n");
+    // Standard input follows the dialect no pattern changes.
+    let out = scuff_in(&dir, &["format"], "import a._\n");
+    assert_eq!(text(&out.stdout), "import a.*\n");
+}
+
+#[test]
+fn without_a_dialect_it_is_scala_3() {
+    let dir = repository("no_dialect", &[("A.scala", "import a._\n")]);
+    let out = scuff_in(&dir, &["format", "A.scala"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(read(&dir, "A.scala"), "import a.*\n");
+}
+
+#[test]
+fn a_scala_2_dialect_keeps_imports() {
+    let dir = repository(
+        "scala_2",
+        &[
+            (".scuff.toml", "dialect = \"scala213\"\n"),
+            ("A.scala", "import a._\n"),
+        ],
+    );
+    let out = scuff_in(&dir, &["format", "A.scala"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(read(&dir, "A.scala"), "import a._\n");
+}
