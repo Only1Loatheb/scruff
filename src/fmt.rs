@@ -13,7 +13,7 @@ use crate::doc::{AlignPart, Doc, PrintOptions, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
     SyntaxTrivia, TextRange, TextSize, Tree, TriviaKind, VerbatimRange, VerbatimReason,
-    check_equivalent, parse,
+    check_equivalent_trees, parse,
 };
 
 /// Formatting is deliberately not configurable beyond this. Indentation is
@@ -110,51 +110,57 @@ fn format_with(
     rules: Rules,
     style: Style,
 ) -> Result<String, FormatError> {
-    let once = format_once(source, options, rules, style)?;
+    let original = parse(source);
+    let (once, once_tree) = format_once(&original, options, rules, style)?;
     // Breaking a line can leave something to rewrite, as braces around a
     // block that no longer fits on one: a second pass rewrites it, so that
     // formatting the result changes nothing.
     if once != source
-        && rewrite::changes(&parse(&once), options.dialect)
-        && let Ok(twice) = format_once(&once, options, rules, style)
-        && check_equivalent(source, &twice).is_ok()
+        && rewrite::changes(&once_tree, options.dialect)
+        && let Ok((twice, twice_tree)) = format_once(&once_tree, options, rules, style)
+        && check_equivalent_trees(&original, &twice_tree).is_ok()
     {
         return Ok(twice);
     }
     Ok(once)
 }
 
+/// One formatting pass over `original`, already parsed: the text and its
+/// tree, checked against the original.
 fn format_once(
-    source: &str,
+    original: &Tree,
     options: &FormatOptions,
     rules: Rules,
     style: Style,
-) -> Result<String, FormatError> {
-    let tree = parse(source);
-    if !tree.errors().is_empty() {
-        return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
+) -> Result<(String, Tree), FormatError> {
+    if !original.errors().is_empty() {
+        return Err(FormatError::SyntaxErrors(original.errors().to_vec()));
     }
     // Rewritten to the dialect's syntax first, where tree-sitter-scala reads
     // the result as the same code.
-    let tree = rewrite::rewrite(&tree, options.dialect).map_or(tree, |r| r.tree);
+    let rewritten = rewrite::rewrite(original, options.dialect).map(|r| r.tree);
+    let tree = rewritten.as_ref().unwrap_or(original);
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let layout = indent::Layout::new(&tree, &relaid_lists(&tree, rules, style));
+    let layout = indent::Layout::new(tree, &relaid_lists(tree, rules, style));
     let reindented = !layout.is_empty();
-    let formatted = print(&build_doc(&tree, rules, style, layout), &print_options);
-    match check_equivalent(source, &formatted) {
-        Ok(()) => Ok(formatted),
+    let formatted = print(&build_doc(tree, rules, style, layout), &print_options);
+    let formatted_tree = parse(&formatted);
+    match check_equivalent_trees(original, &formatted_tree) {
+        Ok(()) => Ok((formatted, formatted_tree)),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&tree, rules, style, indent::Layout::default());
+            let doc = build_doc(tree, rules, style, indent::Layout::default());
             let formatted = print(&doc, &print_options);
-            check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
-            Ok(formatted)
+            let formatted_tree = parse(&formatted);
+            check_equivalent_trees(original, &formatted_tree)
+                .map_err(FormatError::NotEquivalent)?;
+            Ok((formatted, formatted_tree))
         }
         Err(difference) => Err(FormatError::NotEquivalent(difference)),
     }
