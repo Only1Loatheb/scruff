@@ -89,9 +89,6 @@ def f = { a }
 val g = {
   a
 }.map(h)
-xs.foreach { x =>
-  println(x)
-}
 new A {
   val x = 1
 }
@@ -100,9 +97,6 @@ def f = { a }
 val g = {
   a
 }.map(h)
-xs.foreach { x =>
-  println(x)
-}
 new A {
   val x = 1
 }

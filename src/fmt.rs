@@ -1794,6 +1794,12 @@ mod tests {
                                         | SyntaxKind::EnumBody
                                 )
                                 && rewrite::braces_back(&tree, *n).is_some()
+                            || new
+                                && n.kind() == SyntaxKind::CallExpression
+                                && rewrite::fewer_braces(&tree, *n).is_some()
+                            || !new
+                                && n.kind() == SyntaxKind::ColonArgument
+                                && rewrite::fewer_braces_back(&tree, *n).is_some()
                     });
                     // Unless it's copied verbatim, as in `format: off`, or left as
                     // written because tree-sitter-scala reads it differently

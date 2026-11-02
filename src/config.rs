@@ -28,9 +28,10 @@
 //! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
 //!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard`,
 //!   `allowPostfixStarVarargSplices`, `allowQuietSyntax` and
-//!   `allowSignificantIndentation`, also under `fileOverride`, whose patterns
-//!   are tried longest first, as in scalafmt. The dialect is `scala3` when
-//!   none is named.
+//!   `allowSignificantIndentation`, also under `fileOverride`, whose
+//!   patterns are tried longest first, as in scalafmt. The dialect is
+//!   `scala3` when none is named. Fewer braces go with significant
+//!   indentation; `allowFewerBraces` isn't read.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -84,6 +85,10 @@ pub struct Dialect {
     /// Indentation for braces: `class A:` for `class A {`, and `def f =`
     /// with its body indented below for `def f = {`. Only Scala 3's.
     pub significant_indentation: bool,
+    /// A colon argument for a braced one: `xs.map: x =>` with the body
+    /// indented below for `xs.map { x =>`. Only Scala 3's, since 3.3, and
+    /// only with significant indentation, which a colon argument is.
+    pub fewer_braces: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -104,6 +109,7 @@ impl Dialect {
         postfix_star_vararg_splices: true,
         quiet_syntax: true,
         significant_indentation: true,
+        fewer_braces: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -125,6 +131,7 @@ impl Dialect {
             postfix_star_vararg_splices: new_syntax,
             quiet_syntax: scala3,
             significant_indentation: scala3,
+            fewer_braces: scala3,
         })
     }
 }
@@ -170,6 +177,8 @@ impl DialectSetting {
         if let Some(allow) = self.significant_indentation {
             dialect.significant_indentation = allow;
         }
+        // A colon argument is indentation syntax.
+        dialect.fewer_braces &= dialect.significant_indentation;
         Ok(dialect)
     }
 
@@ -859,6 +868,7 @@ mod tests {
             postfix_star_vararg_splices: true,
             quiet_syntax: true,
             significant_indentation: true,
+            fewer_braces: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -867,10 +877,12 @@ mod tests {
             postfix_star_vararg_splices: false,
             quiet_syntax: false,
             significant_indentation: false,
+            fewer_braces: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
             significant_indentation: false,
+            fewer_braces: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
@@ -892,6 +904,13 @@ mod tests {
             config("").dialect_for(file("/p/A.scala").as_deref()),
             Dialect::SCALA3
         );
+        // `allowFewerBraces` isn't read; fewer braces go with significant
+        // indentation.
+        let fewer = |text: &str| config(text).dialect_for(None).fewer_braces;
+        assert!(fewer("runner.dialectOverride.allowFewerBraces = false"));
+        assert!(!fewer(
+            "runner.dialectOverride.allowSignificantIndentation = false"
+        ));
         let c = config(
             r#"
             runner.dialect = scala3

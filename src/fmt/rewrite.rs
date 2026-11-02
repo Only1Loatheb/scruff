@@ -241,6 +241,12 @@ fn edits_for(
             {
                 edits.extend(braces_back(tree, node).into_iter().flatten());
             }
+            SyntaxKind::CallExpression if dialect.fewer_braces => {
+                edits.extend(fewer_braces(tree, node).into_iter().flatten());
+            }
+            SyntaxKind::ColonArgument if !dialect.fewer_braces => {
+                edits.extend(fewer_braces_back(tree, node).into_iter().flatten());
+            }
             SyntaxKind::ArrowRenamedIdentifier if dialect.as_for_import_rename => {
                 for token in tokens().filter(|t| matches!(t.text(), "=>" | "\u{21D2}")) {
                     edits.push((token.text_range(), spaced(text, &token, "as")));
@@ -675,6 +681,163 @@ pub(super) fn braces(tree: &Tree, node: SyntaxNode<'_>) -> Option<Vec<(TextRange
     Some(edits)
 }
 
+/// The edits that make a call's braced argument a colon argument, as
+/// SIP-44 allows: `xs.map { x =>` to `xs.map: x =>`, `xs.foreach {` to
+/// `xs.foreach:` and `xs.collect {` with `case` clauses to `xs.collect:`,
+/// with the `}` line gone. None unless the lambda's parameters are a name,
+/// `_` or in parentheses, `{` or the lambda's `=>` ends its line, `}` is
+/// alone on its own, every line between is deeper than the `}`, the `{`
+/// line and the call's first line, and the next line isn't deeper than the
+/// `}`.
+pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit>> {
+    let text = tree.syntax().text();
+    let argument = call.child_by_field_name("arguments")?.into_node()?;
+    if !matches!(argument.kind(), SyntaxKind::Block | SyntaxKind::CaseBlock) {
+        return None;
+    }
+    let mut children = argument.non_trivia_children();
+    let open = children.next()?.into_token()?;
+    let close = argument.non_trivia_children().last()?.into_token()?;
+    if open.text() != "{" || close.text() != "}" {
+        return None;
+    }
+    let before = previous_code(open)?;
+    let at = |offset: TextSize| usize::from(offset);
+    let line_start = |offset: TextSize| text[..at(offset)].rfind('\n').map_or(0, |i| i + 1);
+    let indent = |offset: TextSize| {
+        let start = line_start(offset);
+        text[start..].len() - text[start..].trim_start_matches(' ').len()
+    };
+    let breaks = |from: TextSize, to: TextSize| text[at(from)..at(to)].contains('\n');
+    // What ends the `{` line: the `{`, or a lambda's `=>`.
+    let statements: Vec<_> = argument
+        .non_trivia_children()
+        .filter(|c| c.kind().is_named())
+        .collect();
+    let line_end = match statements.as_slice() {
+        [NodeOrToken::Node(lambda)] if lambda.kind() == SyntaxKind::LambdaExpression => {
+            let parameters = lambda.child_by_field_name("parameters")?;
+            if !matches!(
+                parameters.kind(),
+                SyntaxKind::Identifier | SyntaxKind::Wildcard | SyntaxKind::Bindings
+            ) || breaks(open.text_range().end(), parameters.text_range().start())
+            {
+                return None;
+            }
+            lambda
+                .children_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .find(|t| t.text() == "=>")?
+        }
+        [] => return None,
+        _ => open,
+    };
+    let first = next_code(line_end)?;
+    let last = previous_code(close)?;
+    if first == close
+        || before
+            .text()
+            .chars()
+            .next_back()
+            .is_some_and(is_operator_char)
+        || !text[at(before.text_range().end())..at(open.text_range().start())]
+            .chars()
+            .all(|c| c == ' ')
+        || !breaks(line_end.text_range().end(), first.text_range().start())
+        || !breaks(last.text_range().end(), close.text_range().start())
+        || !text[line_start(close.text_range().start())..at(close.text_range().start())]
+            .trim()
+            .is_empty()
+    {
+        return None;
+    }
+    let call_first = call.tokens().find(|t| t.owns_trivia())?;
+    let floor = indent(close.text_range().start())
+        .max(indent(open.text_range().start()))
+        .max(indent(call_first.text_range().start()));
+    if !lines_deeper(
+        tree,
+        at(line_end.text_range().end()),
+        line_start(close.text_range().start()),
+        floor,
+    ) {
+        return None;
+    }
+    if argument.kind() == SyntaxKind::CaseBlock {
+        for clause in argument
+            .children()
+            .filter(|c| c.kind() == SyntaxKind::CaseClause)
+        {
+            let first = clause.tokens().find(|t| !t.is_trivia())?;
+            let end = clause.last_code_token()?.text_range().end();
+            if !lines_deeper(
+                tree,
+                at(first.text_range().end()),
+                at(end),
+                indent(first.text_range().start()),
+            ) {
+                return None;
+            }
+        }
+    }
+    // Nothing after the `}` on its line, and no deeper line next.
+    let eol = text[at(close.text_range().end())..]
+        .find('\n')
+        .map_or(text.len(), |i| at(close.text_range().end()) + i);
+    let after = next_code(close);
+    if !text[at(close.text_range().end())..eol].trim().is_empty()
+        || after
+            .is_some_and(|a| indent(a.text_range().start()) > indent(close.text_range().start()))
+    {
+        return None;
+    }
+    let line_break = text[..at(close.text_range().start())].rfind('\n')?;
+    Some(vec![
+        (
+            TextRange::new(before.text_range().end(), open.text_range().end()),
+            ":".to_string(),
+        ),
+        (
+            TextRange::new(
+                TextSize::try_from(line_break).ok()?,
+                close.text_range().end(),
+            ),
+            String::new(),
+        ),
+    ])
+}
+
+/// The edits that make a colon argument a braced one, for a dialect
+/// without SIP-44: `xs.map: x =>` to `xs.map { x =>`, with a `}` on a line
+/// of its own after the body, at the width of the line the call's argument
+/// lists start on, as `fn(` when they end on a later line: `): x =>`. None
+/// if it ends in an end marker.
+pub(super) fn fewer_braces_back(tree: &Tree, argument: SyntaxNode<'_>) -> Option<Vec<Edit>> {
+    let text = tree.syntax().text();
+    let colon = previous_code(argument.tokens().find(|t| t.owns_trivia())?)?;
+    let last = argument.last_code_token()?;
+    if colon.text() != ":" || next_code(last).is_some_and(|t| t.text() == "end") {
+        return None;
+    }
+    let at = |offset: TextSize| usize::from(offset);
+    // Back over argument lists to the line they start on.
+    let mut anchor = colon;
+    while let Some(previous) = previous_code(anchor).filter(|t| matches!(t.text(), ")" | "]")) {
+        anchor = previous.parent()?.tokens().find(|t| t.owns_trivia())?;
+    }
+    let start = text[..at(anchor.text_range().start())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let width = text[start..].len() - text[start..].trim_start_matches(' ').len();
+    let end = at(last.text_range().end());
+    let eol = text[end..].find('\n').map_or(text.len(), |i| end + i);
+    let eol = TextSize::try_from(eol).ok()?;
+    Some(vec![
+        (colon.text_range(), " {".to_string()),
+        (TextRange::empty(eol), format!("\n{}}}", " ".repeat(width))),
+    ])
+}
+
 /// Whether every line starting in `start..end` is indented deeper than
 /// `width`, with spaces: not the line `start` is on, blank lines, lines
 /// inside a string or comment, or a closing bracket's, which ends what it
@@ -956,6 +1119,7 @@ mod tests {
     /// Scala 3 with braces kept, for the rewrites besides theirs.
     const NEW: Dialect = Dialect {
         significant_indentation: false,
+        fewer_braces: false,
         ..Dialect::SCALA3
     };
     const SCALA3: Dialect = Dialect::SCALA3;
@@ -966,6 +1130,7 @@ mod tests {
         postfix_star_vararg_splices: false,
         quiet_syntax: false,
         significant_indentation: false,
+        fewer_braces: false,
     };
 
     /// The rewritten text, if anything changed.
@@ -1191,7 +1356,10 @@ mod tests {
             assert_eq!(changed(source, NEW), None, "{source}");
         }
         // Written with indentation, so in full Scala 3.
-        assert_eq!(changed("def f =\n  if (c)\n    a\n  end if\n", SCALA3), None);
+        assert_eq!(
+            changed("def f =\n  if (c)\n    a\n  end if\n", SCALA3),
+            None
+        );
         // Neither `if`: the outer one would take the `else`.
         assert_eq!(changed("if (a) x = if (b) 1 else 2\n", NEW), None);
         let source3 = Dialect {
@@ -1276,8 +1444,6 @@ mod tests {
             // A `for` without `yield` after its enumerators.
             "for {\n  x <- xs\n}\n{\n  f(x)\n}\n",
             // Not where Scala 3 allows indentation for braces.
-            "f {\n  a\n}\n",
-            "xs.map { x =>\n  x\n}\n",
             "new A {\n  val x = 1\n}\n",
             "val x = {\n  a\n}\n".replace("val x = ", "{\n").as_str(),
         ] {
@@ -1323,6 +1489,49 @@ mod tests {
             "def f =\n  a\n  b\nend f\n",
         ] {
             assert_eq!(changed(same, OLD), None, "{same}");
+        }
+    }
+
+    #[test]
+    fn fewer_braces() {
+        let fewer = Dialect {
+            fewer_braces: true,
+            ..NEW
+        };
+        for (braced, colon) in [
+            ("xs.map { x =>\n  a\n  b\n}\n", "xs.map: x =>\n  a\n  b\n"),
+            ("xs.map { (x, y) =>\n  a\n}\n", "xs.map: (x, y) =>\n  a\n"),
+            ("xs.foreach { _ =>\n  a\n}\n", "xs.foreach: _ =>\n  a\n"),
+            ("xs.foreach {\n  a\n  b\n}\n", "xs.foreach:\n  a\n  b\n"),
+            (
+                "xs.collect {\n  case a => b\n}\n",
+                "xs.collect:\n  case a => b\n",
+            ),
+            ("f(a) { x =>\n  b\n}\n", "f(a): x =>\n  b\n"),
+            (
+                "val y = xs\n  .map { x =>\n    a\n  }\n",
+                "val y = xs\n  .map: x =>\n    a\n",
+            ),
+        ] {
+            assert_eq!(rewritten(braced, fewer), colon, "{braced}");
+            assert_eq!(rewritten(colon, OLD), braced, "{colon}");
+        }
+        for same in [
+            // On one line.
+            "xs.map { x => a }\n",
+            // Something after the `}`.
+            "xs.map { x =>\n  a\n}.filter(p)\n",
+            "f(xs.map { x =>\n  a\n})\n",
+            // The body starting on the `=>` line.
+            "xs.map { x => a\n  b\n}\n",
+            // A typed parameter without parentheses.
+            "xs.map { x: Int =>\n  a\n}\n",
+            // An operator before the `{`.
+            "xs ++ {\n  a\n}\n",
+            // Not deeper than the `}`.
+            "xs.map { x =>\na\n}\n",
+        ] {
+            assert_eq!(changed(same, fewer), None, "{same}");
         }
     }
 

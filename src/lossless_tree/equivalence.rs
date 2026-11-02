@@ -21,7 +21,9 @@
 //! the same as the old: `if c then a` as `if (c) a`, `while c do x` as
 //! `while (c) x`, and `for x <- xs do f(x)` as `for (x <- xs) f(x)`. Braces
 //! mean the same as Scala 3's indentation: `def f = { a }` as `def f =` with
-//! `a` indented below, and `class A { ... }` as `class A:`.
+//! `a` indented below, and `class A { ... }` as `class A:`. A braced argument
+//! means the same as a colon argument: `xs.map { x => a }` as `xs.map: x =>`
+//! with `a` indented below.
 
 use std::fmt;
 
@@ -186,6 +188,16 @@ fn is_type_wildcard_token(token: &SyntaxToken<'_>) -> bool {
 /// node's: `c` in `if (c) a` is the condition, as in `if c then a`.
 fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
     match element.parent() {
+        // A colon argument's lambda parameters are a lambda's, and its
+        // body or cases are the call's arguments.
+        Some(parent) if parent.kind() == SyntaxKind::ColonArgument => match element.field_name() {
+            Some("lambda_start") => match element.as_token() {
+                Some(t) if matches!(t.text(), "=>" | "?=>" | "\u{21D2}") => None,
+                _ => Some("parameters"),
+            },
+            _ if is_colon_lambda(&parent) => element.field_name(),
+            _ => parent.field_name(),
+        },
         Some(parent)
             if is_condition_parens(&parent)
                 || is_case_body_block(&parent)
@@ -259,7 +271,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_type_wildcard_node(&node)
                 || is_old_splice_node(&node)
                 || is_condition_parens(&node)
-                || is_case_body_block(&node) =>
+                || is_case_body_block(&node)
+                || is_argument_wrapper(&node) =>
         {
             None
         }
@@ -279,6 +292,13 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
         || is_old_splice_token(token)
         || is_control_token(token)
         || is_optional_brace(token)
+        || (token.text() == ":"
+            && token
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::CallExpression)
+            && std::iter::successors(token.next_sibling_or_token(), |e| e.next_sibling_or_token())
+                .find(|e| !e.is_trivia())
+                .is_some_and(|e| e.kind() == SyntaxKind::ColonArgument))
 }
 
 /// A `case` clause's body in braces, as in `case a => { b; c }`, which
@@ -410,7 +430,7 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
     if node.kind() != SyntaxKind::IndentedBlock
         || !node
             .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression)
+            .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression || is_colon_lambda(&p))
     {
         return false;
     }
@@ -421,6 +441,38 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
             !(name.ends_with("_definition") || name.ends_with("_declaration"))
         }
         _ => false,
+    }
+}
+
+/// A colon argument that is a lambda, as `xs.map: x =>`.
+fn is_colon_lambda(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::ColonArgument
+        && node
+            .children_with_tokens()
+            .any(|c| c.field_name() == Some("lambda_start"))
+}
+
+/// What a braced argument and a colon argument differ by, besides their
+/// braces and colon: the colon argument itself, and a braced argument
+/// that's only a lambda, with that lambda. `xs.map { x => a }` means
+/// `xs.map: x =>` with `a` indented below.
+fn is_argument_wrapper(node: &SyntaxNode<'_>) -> bool {
+    match node.kind() {
+        SyntaxKind::ColonArgument => true,
+        SyntaxKind::Block => is_lambda_argument(node),
+        SyntaxKind::LambdaExpression => node.parent().is_some_and(|p| is_lambda_argument(&p)),
+        _ => false,
+    }
+}
+
+/// A braced argument holding only a lambda.
+fn is_lambda_argument(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::Block && node.field_name() == Some("arguments") && {
+        let mut statements = node.non_trivia_children().filter(|c| c.kind().is_named());
+        matches!(
+            (statements.next(), statements.next()),
+            (Some(only), None) if only.kind() == SyntaxKind::LambdaExpression
+        )
     }
 }
 
@@ -699,6 +751,26 @@ mod tests {
         );
         // Statements that move out of the block don't.
         differs("def f = {\n  a\n  b\n}\n", "def f =\n  a\nb\n");
+    }
+
+    #[test]
+    fn colon_arguments_mean_braced_ones() {
+        for (braced, colon) in [
+            ("xs.map { x =>\n  a\n  b\n}\n", "xs.map: x =>\n  a\n  b\n"),
+            ("xs.map { x =>\n  a\n}\n", "xs.map: x =>\n  a\n"),
+            ("xs.map { (x, y) =>\n  a\n}\n", "xs.map: (x, y) =>\n  a\n"),
+            ("xs.foreach {\n  a\n  b\n}\n", "xs.foreach:\n  a\n  b\n"),
+            (
+                "xs.collect {\n  case a => b\n}\n",
+                "xs.collect:\n  case a => b\n",
+            ),
+            ("f(a) { x =>\n  b\n}\n", "f(a): x =>\n  b\n"),
+        ] {
+            assert_eq!(check_equivalent(braced, colon), Ok(()), "{braced}");
+            assert_eq!(check_equivalent(colon, braced), Ok(()), "{colon}");
+        }
+        differs("xs.map { x =>\n  a\n  b\n}\n", "xs.map: y =>\n  a\n  b\n");
+        differs("xs.foreach {\n  a\n  b\n}\n", "xs.foreach:\n  a\nb\n");
     }
 
     #[test]

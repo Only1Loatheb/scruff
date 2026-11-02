@@ -160,6 +160,8 @@ class A:
   )
 
 <<< a block after a list over several lines is indented from the line it ends up on
+dialect = scala3
+===
 def test() =
   fn2(
       arg = "blue sleeps faster than tuesday",

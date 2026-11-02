@@ -1,0 +1,85 @@
+# Braced arguments become colon arguments, as SIP-44 allows in Scala 3.
+dialect = scala3
+
+<<< lambdas, blocks and cases
+val a = xs.map { x =>
+  val y = x + 1
+  y * 2
+}
+val b = xs.map { (x, y) =>
+  x + y
+}
+xs.foreach {
+  println("a")
+  println("b")
+}
+val c = xs.collect {
+  case Some(x) => x
+}
+>>>
+val a = xs.map: x =>
+  val y = x + 1
+  y * 2
+val b = xs.map: (x, y) =>
+  x + y
+xs.foreach:
+  println("a")
+  println("b")
+val c = xs.collect:
+  case Some(x) => x
+
+<<< in a chain, and after other arguments
+val a = xs
+  .filter(p)
+  .map { x =>
+    x + 1
+  }
+foo(a) { x =>
+  x
+}
+>>>
+val a = xs
+  .filter(p)
+  .map: x =>
+    x + 1
+foo(a): x =>
+  x
+
+<<< braces stay on one line, before more code, or inside parentheses
+val a = xs.map { x => x + 1 }
+val b = xs.map { x =>
+  x + 1
+}.filter(p)
+f(xs.map { x =>
+  x + 1
+})
+>>>
+val a = xs.map { x => x + 1 }
+val b = xs.map { x =>
+  x + 1
+}.filter(p)
+f(xs.map { x =>
+  x + 1
+})
+
+<<< Scala 2 gets braces back
+dialect = scala213
+===
+val a = xs.map: x =>
+  val y = x + 1
+  y * 2
+fn2(
+    arg = "blue sleeps faster than tuesday",
+    arg2 = "the quick brown fox jumped over the lazy dog"): env =>
+  println(env)
+>>>
+val a = xs.map { x =>
+  val y = x + 1
+  y * 2
+}
+fn2(
+  arg = "blue sleeps faster than tuesday",
+  arg2 = "the quick brown fox jumped over the lazy dog",
+) { env =>
+  println(env)
+}
