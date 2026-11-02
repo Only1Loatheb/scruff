@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use scuff::fmt;
 use scuff::lossless_tree;
 
 /// Tools for working with Scala source code.
@@ -15,6 +16,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Format a Scala file in place, or standard input to standard output
+    ///
+    /// Exits with 1 if `--check` finds the file would change, and with 2 if
+    /// it can't be formatted: it can't be read or written, has syntax
+    /// errors, or formatting would change what the code means.
+    Format {
+        /// The file to format, overwritten with the result; reads standard
+        /// input and prints the result when omitted or `-`
+        file: Option<PathBuf>,
+
+        /// Print nothing; instead exit with 1, naming the file, if it would
+        /// change
+        #[arg(long)]
+        check: bool,
+    },
     /// Parse a Scala file and print its concrete syntax tree
     Parse {
         /// The file to parse; reads standard input when omitted or `-`
@@ -34,8 +50,56 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Format { file, check } => format(file, check),
         Command::Parse { file, quiet } => parse(file, quiet),
         Command::Comments { file } => comments(file),
+    }
+}
+
+fn format(file: Option<PathBuf>, check: bool) -> ExitCode {
+    let path = file.clone().filter(|f| f.as_os_str() != "-");
+    let (name, source) = match read_source(file) {
+        Ok(input) => input,
+        Err(code) => return code,
+    };
+    match fmt::format(&source, &fmt::FormatOptions::default()) {
+        Ok(formatted) if check => {
+            if formatted == source {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("{name}: would be reformatted");
+                ExitCode::FAILURE
+            }
+        }
+        Ok(formatted) => match path {
+            // Only a file that changes is written, so its time stamp moves
+            // only then.
+            Some(path) if formatted != source => match std::fs::write(&path, formatted) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("error: can't write {name}: {err}");
+                    ExitCode::from(2)
+                }
+            },
+            Some(_) => ExitCode::SUCCESS,
+            None => {
+                print!("{formatted}");
+                ExitCode::SUCCESS
+            }
+        },
+        Err(fmt::FormatError::SyntaxErrors(errors)) => {
+            let tree = lossless_tree::parse(&source);
+            for error in errors {
+                let (line, col) = tree.line_col(error.range().start());
+                eprintln!("{name}:{line}:{col}: error: {error}");
+            }
+            eprintln!("{name}: not formatted because of syntax errors");
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("{name}: error: {error}");
+            ExitCode::from(2)
+        }
     }
 }
 
