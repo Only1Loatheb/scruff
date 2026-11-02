@@ -241,6 +241,27 @@ fn edits_for(
             {
                 edits.extend(braces_back(tree, node).into_iter().flatten());
             }
+            // `catch case e => b`, one case on the `catch` line, is Scala 3's.
+            SyntaxKind::CatchClause if !dialect.significant_indentation => {
+                let case = tokens().find(|t| t.text() == "case");
+                if let (Some(case), Some(last)) = (case, node.last_code_token()) {
+                    let at = |offset: TextSize| usize::from(offset);
+                    let start = at(case.text_range().start());
+                    let end = at(last.text_range().end());
+                    edits.push((TextRange::empty(case.text_range().start()), "{ ".into()));
+                    if text[start..end].contains('\n') {
+                        // Over several lines, the `}` on its own at the
+                        // `catch` line's width, after the last line.
+                        let line = text[..start].rfind('\n').map_or(0, |i| i + 1);
+                        let width = text[line..].len() - text[line..].trim_start_matches(' ').len();
+                        let eol = text[end..].find('\n').map_or(text.len(), |i| end + i);
+                        let eol = TextSize::try_from(eol).unwrap_or_default();
+                        edits.push((TextRange::empty(eol), format!("\n{}}}", " ".repeat(width))));
+                    } else {
+                        edits.push((TextRange::empty(last.text_range().end()), " }".into()));
+                    }
+                }
+            }
             SyntaxKind::CallExpression if dialect.fewer_braces => {
                 edits.extend(fewer_braces(tree, node).into_iter().flatten());
             }

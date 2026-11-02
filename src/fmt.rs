@@ -334,18 +334,35 @@ impl<'t> Formatter<'t> {
         }
     }
 
-    /// Where it starts, for an `if`'s `then` or `else` body that is one
-    /// expression: on the keyword's line if it fits, as `if c then a`,
-    /// `if (c) a` and `else b`, or else where it would be anyway. Not with comments around it, an
-    /// expression over several lines, or one with an `if` inside, which
-    /// could take an `else` after it; nor after a condition over several
-    /// lines, or for an `if` inside parentheses.
+    /// Where it starts, for a body of one expression after `then`, `else`,
+    /// an `if`'s condition, `try` or `finally`, or a `catch`'s one `case`:
+    /// on the keyword's line if it fits, as `if c then a`, `else b`,
+    /// `try a`, `catch case e => b` and `finally c`, or else where it would
+    /// be anyway. Not with comments around it, a body over several lines,
+    /// or one with an `if` inside, which could take an `else` after it; nor
+    /// after an `if` condition over several lines, or inside parentheses.
     fn joinable_body(&self, node: SyntaxNode<'t>) -> Option<TextSize> {
-        if node.kind() != SyntaxKind::IndentedBlock
-            || !matches!(node.field_name(), Some("consequence" | "alternative"))
-            || node.parent()?.kind() != SyntaxKind::IfExpression
-            || !self.free_at(node.text_range().start())
-        {
+        let owner = node.parent()?;
+        let keyword =
+            std::iter::successors(node.first_token()?.prev_token(), SyntaxToken::prev_token)
+                .find(SyntaxToken::owns_trivia)?;
+        let expected = match (node.kind(), owner.kind(), node.field_name()) {
+            (SyntaxKind::IndentedBlock, SyntaxKind::IfExpression, Some("consequence" | "alternative")) => {
+                // After the condition's `)`, or `then` or `else`.
+                matches!(keyword.text(), "then" | "else")
+                    || keyword.text() == ")"
+                        && keyword.parent().is_some_and(|p| {
+                            p.field_name() == Some("condition") && p.parent() == Some(owner)
+                        })
+            }
+            (SyntaxKind::IndentedBlock, SyntaxKind::TryExpression, Some("body")) => {
+                keyword.text() == "try"
+            }
+            (SyntaxKind::IndentedBlock, SyntaxKind::FinallyClause, _) => keyword.text() == "finally",
+            (SyntaxKind::IndentedCases, SyntaxKind::CatchClause, _) => keyword.text() == "catch",
+            _ => false,
+        };
+        if !expected || !self.free_at(node.text_range().start()) {
             return None;
         }
         let mut statements = node.non_trivia_children();
@@ -353,17 +370,14 @@ impl<'t> Formatter<'t> {
             return None;
         };
         let name = only.kind().name();
-        let keyword =
-            std::iter::successors(node.first_token()?.prev_token(), SyntaxToken::prev_token)
-                .find(SyntaxToken::owns_trivia)?;
         let first = first_code_token(&only)?;
-        // The condition on one line, as the `if`'s layout is decided with
-        // the body on its own; and not in parentheses, whose list is.
-        let if_expression = node.parent()?;
-        let if_line = if_expression.first_token()?.text_range().start();
-        let split_condition = keyword.text() != "else"
-            && self.has_line_break(TextRange::new(if_line, keyword.text_range().start()));
-        let in_parentheses = if_expression.ancestors().any(|a| {
+        // An `if`'s condition on one line, as the `if`'s layout is decided
+        // with the body on its own; and not in parentheses, whose list is.
+        let owner_line = owner.first_token()?.text_range().start();
+        let split_condition = owner.kind() == SyntaxKind::IfExpression
+            && keyword.text() != "else"
+            && self.has_line_break(TextRange::new(owner_line, keyword.text_range().start()));
+        let in_parentheses = owner.ancestors().any(|a| {
             matches!(
                 a.kind(),
                 SyntaxKind::Arguments
@@ -371,24 +385,28 @@ impl<'t> Formatter<'t> {
                     | SyntaxKind::TupleExpression
             )
         });
-        if split_condition || in_parentheses {
-            return None;
-        }
         // An `if` inside could take an `else` after it.
         let has_if = only.as_node().is_some_and(|n| {
             n.descendants()
                 .any(|d| d.kind() == SyntaxKind::IfExpression)
         });
-        if name.ends_with("_definition")
+        // A `case` with nothing after its arrow would take what follows,
+        // and tree-sitter-scala misreads one whose body is in braces or
+        // has a `;`.
+        let empty_case = only.kind() == SyntaxKind::CaseClause
+            && only.as_node().is_none_or(|c| {
+                c.child_by_field_name("body")
+                    .is_none_or(|b| b.kind() == SyntaxKind::Block)
+                    || c.tokens().any(|t| t.text() == ";")
+            });
+        if split_condition
+            || in_parentheses
+            || empty_case
+            || has_if
+            || name.ends_with("_definition")
             || name.ends_with("_declaration")
             || only.kind() == SyntaxKind::ImportDeclaration
-            || has_if
             || !only.kind().is_named()
-            || !(matches!(keyword.text(), "then" | "else")
-                || keyword.text() == ")"
-                    && keyword.parent().is_some_and(|p| {
-                        p.field_name() == Some("condition") && p.parent() == node.parent()
-                    }))
             || keyword.trailing_trivia().any(|t| t.is_comment())
             || first.leading_trivia().any(|t| t.is_comment())
             || last_code_token(&only).is_none_or(|t| t.trailing_trivia().any(|c| c.is_comment()))

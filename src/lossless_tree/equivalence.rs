@@ -273,7 +273,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_old_splice_node(&node)
                 || is_condition_parens(&node)
                 || is_case_body_block(&node)
-                || is_argument_wrapper(&node) =>
+                || is_argument_wrapper(&node)
+                || is_lone_catch_case(&node) =>
         {
             None
         }
@@ -307,9 +308,10 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
 fn is_case_body_block(node: &SyntaxNode<'_>) -> bool {
     matches!(node.kind(), SyntaxKind::Block | SyntaxKind::IndentedBlock)
         && node.field_name() == Some("body")
-        && node
-            .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::CaseClause)
+        && node.parent().is_some_and(|p| {
+            // Or a `catch case` on one line's.
+            matches!(p.kind(), SyntaxKind::CaseClause | SyntaxKind::CatchClause)
+        })
 }
 
 /// A brace that Scala 3's indentation can stand for: around a block, cases,
@@ -423,17 +425,22 @@ fn is_lone_rename_braces(node: &SyntaxNode<'_>) -> bool {
     )
 }
 
-/// A lambda body, or an `if`'s `then` or `else` body, that is a block
-/// holding one expression means the same as the expression alone: `x =>`
-/// with `a + 1` on the next line is `x => a + 1`, and `if c then` with `a`
-/// on the next line is `if c then a`. tree-sitter-scala wraps only the first
+/// A lambda body, or an `if`'s `then` or `else` body, or a `try` or
+/// `finally` body, that is a block holding one expression means the same as
+/// the expression alone: `x =>` with `a + 1` on the next line is
+/// `x => a + 1`, and `if c then` with `a` on the next line is
+/// `if c then a`. tree-sitter-scala wraps only the first
 /// in a block, so the block is skipped, which lets a formatter move a body
 /// to its own line or back.
 fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
-    let if_body = matches!(node.field_name(), Some("consequence" | "alternative"))
-        && node
-            .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::IfExpression);
+    let if_body = node.parent().is_some_and(|p| match p.kind() {
+        SyntaxKind::IfExpression => {
+            matches!(node.field_name(), Some("consequence" | "alternative"))
+        }
+        SyntaxKind::TryExpression => node.field_name() == Some("body"),
+        SyntaxKind::FinallyClause => true,
+        _ => false,
+    });
     let lambda_body = node.kind() == SyntaxKind::IndentedBlock
         && node
             .parent()
@@ -452,6 +459,26 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
             !(name.ends_with("_definition") || name.ends_with("_declaration"))
         }
         _ => false,
+    }
+}
+
+/// What holds a `catch`'s only `case`, its cases and the clause, which
+/// `catch case e => b` on one line does without.
+fn is_lone_catch_case(node: &SyntaxNode<'_>) -> bool {
+    let lone_cases = |cases: &SyntaxNode<'_>| {
+        matches!(cases.kind(), SyntaxKind::IndentedCases | SyntaxKind::CaseBlock)
+            && cases
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::CatchClause)
+            && cases
+                .children()
+                .filter(|c| c.kind() == SyntaxKind::CaseClause)
+                .count()
+                == 1
+    };
+    match node.kind() {
+        SyntaxKind::CaseClause => node.parent().is_some_and(|p| lone_cases(&p)),
+        _ => lone_cases(node),
     }
 }
 
@@ -794,6 +821,21 @@ mod tests {
         assert_eq!(check_equivalent(joined, braced), Ok(()));
         // Not a definition, which a block scopes.
         differs("if (c) {\n  val a = 1\n}\n", "if c then val a = 1\n");
+    }
+
+    #[test]
+    fn try_bodies_and_a_lone_catch_case_mean_the_same_hugged() {
+        let braced = "try {\n  a\n} catch {\n  case e: E => b\n} finally {\n  c\n}\n";
+        let indented = "try\n  a\ncatch\n  case e: E => b\nfinally\n  c\n";
+        let hugged = "try a\ncatch case e: E => b\nfinally c\n";
+        assert_eq!(check_equivalent(braced, hugged), Ok(()));
+        assert_eq!(check_equivalent(indented, hugged), Ok(()));
+        assert_eq!(check_equivalent(hugged, braced), Ok(()));
+        assert_eq!(
+            check_equivalent("try a\ncatch { case e: E => b }\n", "try a\ncatch case e: E => b\n"),
+            Ok(())
+        );
+        differs("try a\ncatch case e: E => b\n", "try a\ncatch case f: E => b\n");
     }
 
     #[test]

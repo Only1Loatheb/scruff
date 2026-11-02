@@ -51,12 +51,53 @@ def f =
   if c then a
   else b
 def g =
-  try
+  try a
+  catch case e: Exception => b
+  finally c
+
+<<< a catch with more than one case keeps them on their own lines
+def g =
+  try {
     a
+  } catch {
+    case e: IOException => b
+    case e: Exception => c
+  }
+>>>
+def g =
+  try a
   catch
-    case e: Exception => b
-  finally
-    c
+    case e: IOException => b
+    case e: Exception   => c
+
+<<< Scala 2 gets braces around a catch's case on its line
+dialect = scala213
+===
+def g =
+  try a
+  catch case e: Exception => b
+  finally c
+>>>
+def g =
+  try a
+  catch { case e: Exception => b }
+  finally c
+
+<<< Scala 2 gets braces around a catch's case over several lines
+dialect = scala213
+===
+def g =
+  try a
+  catch case e: Exception =>
+    log(e)
+    b
+>>>
+def g =
+  try a
+  catch { case e: Exception =>
+    log(e)
+    b
+  }
 
 <<< for braces
 for {
@@ -139,8 +180,7 @@ object A {
       b
     } catch {
       case e: Exception => c
-    } finally
-      d
+    } finally d
   def h(x: Int) = x match {
     case 1 => "one"
     case _ => "many"
