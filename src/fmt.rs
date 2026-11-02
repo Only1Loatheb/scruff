@@ -3,7 +3,7 @@ use std::fmt;
 mod indent;
 mod spacing;
 
-use crate::doc::{Doc, PrintOptions, print};
+use crate::doc::{AlignPart, Doc, PrintOptions, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
     SyntaxTrivia, TextRange, TextSize, Tree, TriviaKind, VerbatimRange, VerbatimReason,
@@ -102,25 +102,21 @@ fn format_with(
     if !tree.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(tree.errors().to_vec()));
     }
-    let width = options.max_width;
     let print_options = PrintOptions {
         max_width: options.max_width,
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let reindent = indent::Reindent::new(&tree, &relaid_lists(&tree, rules, style, width));
+    let reindent = indent::Reindent::new(&tree, &relaid_lists(&tree, rules, style));
     let reindented = !reindent.is_empty();
-    let formatted = print(
-        &build_doc(&tree, rules, style, width, reindent),
-        &print_options,
-    );
+    let formatted = print(&build_doc(&tree, rules, style, reindent), &print_options);
     match check_equivalent(source, &formatted) {
         Ok(()) => Ok(formatted),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
         Err(_) if reindented => {
-            let doc = build_doc(&tree, rules, style, width, indent::Reindent::default());
+            let doc = build_doc(&tree, rules, style, indent::Reindent::default());
             let formatted = print(&doc, &print_options);
             check_equivalent(source, &formatted).map_err(FormatError::NotEquivalent)?;
             Ok(formatted)
@@ -131,36 +127,23 @@ fn format_with(
 
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
+    let relaid = relaid_lists(tree, Rules::Structural, STYLE);
     build_doc(
         tree,
         Rules::Structural,
         STYLE,
-        FormatOptions::default().max_width,
-        indent::Reindent::new(
-            tree,
-            &relaid_lists(
-                tree,
-                Rules::Structural,
-                STYLE,
-                FormatOptions::default().max_width,
-            ),
-        ),
+        indent::Reindent::new(tree, &relaid),
     )
 }
 
 /// Where the lists are, as `(` and `)` offsets, that the list rule lays
 /// out itself, for [`indent::Reindent`]: what follows the `)` goes on the
 /// line of the `(`, whether the list is joined or broken.
-fn relaid_lists(
-    tree: &Tree,
-    rules: Rules,
-    style: Style,
-    max_width: usize,
-) -> Vec<(TextSize, TextSize)> {
+fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextSize)> {
     if rules != Rules::Structural {
         return Vec::new();
     }
-    let formatter = Formatter::new(tree, rules, style, max_width, indent::Reindent::default());
+    let formatter = Formatter::new(tree, rules, style, indent::Reindent::default());
     tree.syntax()
         .descendants()
         .filter_map(|node| formatter.list_parts(node))
@@ -177,10 +160,9 @@ fn build_doc<'t>(
     tree: &'t Tree,
     rules: Rules,
     style: Style,
-    max_width: usize,
     reindent: indent::Reindent,
 ) -> Doc<'t> {
-    let mut formatter = Formatter::new(tree, rules, style, max_width, reindent);
+    let mut formatter = Formatter::new(tree, rules, style, reindent);
     let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
@@ -210,8 +192,6 @@ fn build_doc<'t>(
 struct Formatter<'t> {
     tree: &'t Tree,
     rules: Rules,
-    /// The printer's width, for layout decided here, such as alignment.
-    max_width: usize,
     text: &'t str,
     verbatim: &'t [VerbatimRange],
     /// The first verbatim range that hasn't ended before the current
@@ -262,13 +242,11 @@ impl<'t> Formatter<'t> {
         tree: &'t Tree,
         rules: Rules,
         style: Style,
-        max_width: usize,
         reindent: indent::Reindent,
     ) -> Formatter<'t> {
         Formatter {
             tree,
             rules,
-            max_width,
             text: tree.syntax().text(),
             verbatim: tree.verbatim_ranges(),
             next_verbatim: 0,
@@ -757,86 +735,29 @@ impl<'t> Formatter<'t> {
     }
 
     /// `case` clauses with their `=>` aligned, as scalafmt's default
-    /// `align.preset = some`: in each run of clauses on consecutive lines and
-    /// at the same indentation, the arrows line up after the longest
-    /// pattern. A clause whose body goes on to later lines joins the run
-    /// with its first line, and ends it. A blank line or a comment ends a run
-    /// too. Within a run, clauses join a group while its arrow column keeps
-    /// every line in the width; a clause that would push one over starts the
-    /// next group. `None` when no two clauses are next to each other.
+    /// `align.preset = some`: each clause a [`Doc::Align`] row split at its
+    /// `=>`, which continues the run of the clause before it unless a blank
+    /// line or a comment comes between them. The printer decides the
+    /// padding. `None` when no two clauses are next to each other.
     fn aligned_cases(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
         let children: Vec<_> = node.non_trivia_children().collect();
         let alignable: Vec<bool> = children.iter().map(alignable_clause).collect();
         if !alignable.windows(2).any(|w| w[0] && w[1]) {
             return None;
         }
-
-        // Each child rendered; a clause in two parts, up to its `=>` and
-        // from it, each measured.
         let mut parts = Vec::new();
         for (child, alignable) in children.iter().zip(&alignable) {
-            let clause = match child {
-                NodeOrToken::Node(n) if *alignable => self.clause_parts(*n),
+            let row = match child {
+                NodeOrToken::Node(n) if *alignable => self.clause_row(*n),
                 _ => None,
             };
-            parts.push(match clause {
-                Some(clause) => Part::Clause(clause),
-                None => Part::Plain(self.element(*child)),
-            });
+            parts.push(row.unwrap_or_else(|| AlignPart::Other(self.element(*child))));
         }
-
-        // Group the clauses and pad their arrows.
-        let mut padding = vec![0; parts.len()];
-        let mut group: Vec<usize> = Vec::new();
-        let mut column = 0;
-        for i in 0..parts.len() {
-            let Part::Clause(clause) = &parts[i] else {
-                group.clear();
-                continue;
-            };
-            if !clause.aligned {
-                group.clear();
-                continue;
-            }
-            let own = clause.indent + clause.before;
-            let wider = column.max(own);
-            let fits = |k: &usize| match &parts[*k] {
-                Part::Clause(c) => wider + c.after <= self.max_width,
-                Part::Plain(_) => true,
-            };
-            let continues = group.last().is_some_and(|&k| match &parts[k] {
-                Part::Clause(c) => !c.multi_line && c.indent == clause.indent,
-                Part::Plain(_) => false,
-            });
-            let joins =
-                continues && clause.adjacent && group.iter().chain(std::iter::once(&i)).all(fits);
-            if joins {
-                column = wider;
-                group.push(i);
-            } else {
-                group = vec![i];
-                column = own;
-            }
-            for &k in &group {
-                if let Part::Clause(c) = &parts[k] {
-                    padding[k] = column - (c.indent + c.before);
-                }
-            }
-        }
-        let docs = parts
-            .into_iter()
-            .zip(padding)
-            .map(|(part, pad)| match part {
-                Part::Plain(doc) => doc,
-                Part::Clause(c) => c.leading + c.head + Doc::text(" ".repeat(pad)) + c.tail,
-            });
-        Some(Doc::concat(docs))
+        Some(Doc::Align(parts))
     }
 
-    /// A clause split at its `=>`, with the widths alignment needs. `None`
-    /// if it has no arrow, or what comes before it can't be printed on one
-    /// line.
-    fn clause_parts(&mut self, clause: SyntaxNode<'t>) -> Option<ClauseParts<'t>> {
+    /// A clause as a row split at its `=>`, or `None` if it has no arrow.
+    fn clause_row(&mut self, clause: SyntaxNode<'t>) -> Option<AlignPart<'t>> {
         let children: Vec<_> = clause.non_trivia_children().collect();
         let arrow = children.iter().position(
             |c| matches!(c, NodeOrToken::Token(t) if matches!(t.text(), "=>" | "\u{21D2}")),
@@ -848,45 +769,14 @@ impl<'t> Formatter<'t> {
                 .filter(|t| t.kind() == TriviaKind::Newline)
                 .count()
                 == 1;
-        let indent = self
-            .reindent
-            .width(first.text_range().start())
-            .unwrap_or_else(|| first.indentation().len());
-        let leading = self.leading_of(clause);
+        let before = self.leading_of(clause);
         let head = Doc::concat(children[..arrow].iter().map(|c| self.element(*c)));
         let tail = Doc::concat(children[arrow..].iter().map(|c| self.element(*c)));
-        let before = head.flat_width()?;
-        // A body on later lines, or one too long for its line, which a rule
-        // will break: what counts is the arrow's line once broken, up to the
-        // body's first place to break. If even that doesn't fit, the head
-        // would break and lose its arrow, so the clause isn't aligned. That
-        // way a clause measures the same before and after it's broken.
-        // Whether the printer breaks the line ignores a trailing `//`
-        // comment, but alignment counts it, as scalafmt does: a clause isn't
-        // padded into a comment that then runs past the width.
-        let (after, multi_line, aligned) = match tail.flat_width() {
-            Some(width) if indent + before + width <= self.max_width => {
-                (tail.full_flat_width().unwrap_or(width), false, true)
-            }
-            _ => {
-                let first_line = tail.width_to_first_break();
-                (
-                    first_line,
-                    true,
-                    indent + before + first_line <= self.max_width,
-                )
-            }
-        };
-        Some(ClauseParts {
-            leading,
+        Some(AlignPart::Row {
+            before,
             head,
             tail,
-            indent,
-            before,
-            after,
             adjacent,
-            multi_line,
-            aligned,
         })
     }
 
@@ -1226,34 +1116,6 @@ struct ListParts<'t> {
     items: Vec<Vec<SyntaxElement<'t>>>,
     /// The commas between the items, without a trailing one.
     commas: Vec<SyntaxToken<'t>>,
-}
-
-/// A child of a `case` clause list, rendered.
-enum Part<'t> {
-    Clause(ClauseParts<'t>),
-    Plain(Doc<'t>),
-}
-
-/// A one-line `case` clause, rendered in parts for alignment.
-struct ClauseParts<'t> {
-    /// The line break and indentation before it.
-    leading: Doc<'t>,
-    /// Up to the `=>`, with the space before it.
-    head: Doc<'t>,
-    /// From the `=>` on.
-    tail: Doc<'t>,
-    /// Its line's indentation, `head`'s width, and the width of `tail`'s
-    /// first line.
-    indent: usize,
-    before: usize,
-    after: usize,
-    /// Whether it's on the line right after the previous child: no blank
-    /// line or comment in between.
-    adjacent: bool,
-    /// Whether its body goes on to later lines, which ends its run.
-    multi_line: bool,
-    /// Whether it may be aligned at all.
-    aligned: bool,
 }
 
 /// Whether a child of a clause list can be aligned: a `case` clause that

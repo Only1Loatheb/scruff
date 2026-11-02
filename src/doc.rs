@@ -55,6 +55,37 @@ pub enum Doc<'a> {
     /// Forces the enclosing groups to break. Use with a line suffix that
     /// must end its line, such as a `//` comment.
     BreakParent,
+    /// Rows, each starting its own line, whose tails line up where they
+    /// fit. See [`AlignPart`].
+    Align(Vec<AlignPart<'a>>),
+}
+
+/// A part of [`Doc::Align`].
+///
+/// A run is rows in a row, each `adjacent` to the one before, starting at
+/// the same column. Within a run, the tails start at one column, after the
+/// widest head, while every row's first line stays in the width; a row that
+/// would push one over starts the next group. A row whose tail doesn't fit
+/// on its line, so breaks, aligns its first line and ends the run. A row
+/// that can't be aligned at all ends the run too: its head has a line
+/// break, or its first line is too long even unpadded.
+///
+/// What a row's line is measured with counts a trailing `//` comment, a
+/// line suffix, which the printer otherwise leaves out: a row isn't padded
+/// into a comment that then runs past the width.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AlignPart<'a> {
+    /// `before`, which ends in the line break and indentation that start
+    /// the row's line, then `head`, padding, and `tail`.
+    Row {
+        before: Doc<'a>,
+        head: Doc<'a>,
+        tail: Doc<'a>,
+        /// Whether the row can continue the run of the row before it.
+        adjacent: bool,
+    },
+    /// Anything else, which ends the run.
+    Other(Doc<'a>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,7 +171,7 @@ impl<'a> Doc<'a> {
     /// The width of this document up to its first place a line can break,
     /// printed flat until there: what's left on a line when it breaks as
     /// early as it can. A line suffix takes no width.
-    pub fn width_to_first_break(&self) -> usize {
+    fn width_to_first_break(&self) -> usize {
         fn walk(doc: &Doc<'_>, width: &mut usize) -> bool {
             match doc {
                 Doc::Nil | Doc::LineSuffix(_) | Doc::BreakParent => false,
@@ -164,6 +195,9 @@ impl<'a> Doc<'a> {
                     walk(inner, width)
                 }
                 Doc::IfBreak { flat, .. } => walk(flat, width),
+                Doc::Align(parts) => parts
+                    .iter()
+                    .any(|part| part.docs().iter().any(|doc| walk(doc, width))),
             }
         }
         let mut width = 0;
@@ -174,13 +208,13 @@ impl<'a> Doc<'a> {
     /// The width of this document printed on one line, or `None` if it
     /// can't be: it has a hard line break, or text with one. A line suffix,
     /// such as a trailing `//` comment, takes no width.
-    pub fn flat_width(&self) -> Option<usize> {
+    fn flat_width(&self) -> Option<usize> {
         self.flat_width_counting(false)
     }
 
     /// [`Doc::flat_width`] with line suffixes counted too: the whole line as
     /// it reads.
-    pub fn full_flat_width(&self) -> Option<usize> {
+    fn full_flat_width(&self) -> Option<usize> {
         self.flat_width_counting(true)
     }
 
@@ -202,6 +236,23 @@ impl<'a> Doc<'a> {
                 inner.flat_width_counting(suffixes)
             }
             Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
+            Doc::Align(parts) => parts
+                .iter()
+                .flat_map(AlignPart::docs)
+                .map(|doc| doc.flat_width_counting(suffixes))
+                .sum(),
+        }
+    }
+}
+
+impl<'a> AlignPart<'a> {
+    /// Its documents in order, unpadded.
+    fn docs(&self) -> Vec<&Doc<'a>> {
+        match self {
+            AlignPart::Row {
+                before, head, tail, ..
+            } => vec![before, head, tail],
+            AlignPart::Other(doc) => vec![doc],
         }
     }
 }
@@ -264,7 +315,15 @@ struct Command<'d, 'a> {
     base: usize,
     indent: usize,
     mode: Mode,
-    doc: &'d Doc<'a>,
+    doc: Item<'d, 'a>,
+}
+
+/// What a command prints.
+#[derive(Clone, Copy)]
+enum Item<'d, 'a> {
+    Doc(&'d Doc<'a>),
+    /// Spaces that line up a [`Doc::Align`] row.
+    Padding(usize),
 }
 
 fn width(text: &str) -> usize {
@@ -283,7 +342,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
         base: 0,
         indent: 0,
         mode: Mode::Break,
-        doc,
+        doc: Item::Doc(doc),
     }];
     let mut suffixes: Vec<Command<'_, '_>> = Vec::new();
     // Trimming trailing spaces must not reach back into verbatim text.
@@ -296,6 +355,21 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
             mode,
             doc,
         } = command;
+        let doc = match doc {
+            Item::Padding(spaces) => {
+                out.push_str(&" ".repeat(spaces));
+                column += spaces;
+                continue;
+            }
+            Item::Doc(doc) => doc,
+        };
+        // A command for a part of this one, with its indentation and mode.
+        let part = |doc| Command {
+            base,
+            indent,
+            mode,
+            doc: Item::Doc(doc),
+        };
         match doc {
             Doc::Nil | Doc::BreakParent => {}
             Doc::Text(text) => {
@@ -310,19 +384,10 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     None => column + width(text),
                 };
             }
-            Doc::Concat(parts) => {
-                commands.extend(parts.iter().rev().map(|doc| Command {
-                    base,
-                    indent,
-                    mode,
-                    doc,
-                }));
-            }
+            Doc::Concat(parts) => commands.extend(parts.iter().rev().map(part)),
             Doc::Nest(inner) => commands.push(Command {
-                base,
                 indent: indent + 1,
-                mode,
-                doc: inner,
+                ..part(inner)
             }),
             Doc::FromLineIndent(inner) => {
                 let line = &out[out.rfind(['\n', '\r']).map_or(0, |i| i + 1)..];
@@ -331,16 +396,13 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 commands.push(Command {
                     base: bases.len() - 1,
                     indent: 0,
-                    mode,
-                    doc: inner,
+                    ..part(inner)
                 });
             }
             Doc::Group(inner) => {
                 let flat = Command {
-                    base,
-                    indent,
                     mode: Mode::Flat,
-                    doc: inner,
+                    ..part(inner)
                 };
                 let room = options.max_width as isize - column as isize;
                 let mode = if mode == Mode::Flat || fits(flat, &commands, room) {
@@ -349,24 +411,34 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     Mode::Break
                 };
                 commands.push(Command {
-                    base,
-                    indent,
                     mode,
-                    doc: inner,
+                    ..part(inner)
                 });
             }
-            Doc::IfBreak { broken, flat } => commands.push(Command {
-                base,
-                indent,
-                mode,
-                doc: if mode == Mode::Break { broken } else { flat },
-            }),
-            Doc::LineSuffix(inner) => suffixes.push(Command {
-                base,
-                indent,
-                mode,
-                doc: inner,
-            }),
+            Doc::IfBreak { broken, flat } => {
+                commands.push(part(if mode == Mode::Break { broken } else { flat }));
+            }
+            Doc::LineSuffix(inner) => suffixes.push(part(inner)),
+            Doc::Align(parts) => {
+                let line_indent = width(&bases[base]) + indent * indent_width;
+                let padding = align(parts, line_indent, indent_width, options.max_width);
+                for (align_part, pad) in parts.iter().zip(padding).rev() {
+                    match align_part {
+                        AlignPart::Row {
+                            before, head, tail, ..
+                        } => {
+                            commands.push(part(tail));
+                            commands.push(Command {
+                                doc: Item::Padding(pad),
+                                ..part(tail)
+                            });
+                            commands.push(part(head));
+                            commands.push(part(before));
+                        }
+                        AlignPart::Other(doc) => commands.push(part(doc)),
+                    }
+                }
+            }
             Doc::Line(kind) => match (mode, kind) {
                 (Mode::Flat, LineKind::Soft) => {}
                 (Mode::Flat, LineKind::Line) => {
@@ -400,8 +472,149 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
     out
 }
 
+/// A [`Doc::Align`] row, measured.
+struct Row {
+    /// The column its head starts at.
+    start: usize,
+    /// Its head's width.
+    head: usize,
+    /// The width of its tail's first line.
+    after: usize,
+    /// Whether its tail goes on to later lines, which ends its run.
+    multi_line: bool,
+    adjacent: bool,
+}
+
+/// The padding before each part's tail, for parts printed on lines indented
+/// `line_indent`. See [`AlignPart`] for the rules.
+fn align(
+    parts: &[AlignPart<'_>],
+    line_indent: usize,
+    indent_width: usize,
+    max_width: usize,
+) -> Vec<usize> {
+    let rows: Vec<Option<Row>> = parts
+        .iter()
+        .map(|part| {
+            let AlignPart::Row {
+                before,
+                head,
+                tail,
+                adjacent,
+            } = part
+            else {
+                return None;
+            };
+            let start = line_start_after(before, line_indent, indent_width)?;
+            let head = head.flat_width()?;
+            // A tail too long for its line will break: what counts then is
+            // its first line, up to its first place to break. If even that
+            // doesn't fit, the head would have to break, so the row isn't
+            // aligned. That way a row measures the same before and after
+            // it's broken.
+            match tail.flat_width() {
+                Some(width) if start + head + width <= max_width => Some(Row {
+                    start,
+                    head,
+                    after: tail.full_flat_width().unwrap_or(width),
+                    multi_line: false,
+                    adjacent: *adjacent,
+                }),
+                _ => {
+                    let after = tail.width_to_first_break();
+                    (start + head + after <= max_width).then_some(Row {
+                        start,
+                        head,
+                        after,
+                        multi_line: true,
+                        adjacent: *adjacent,
+                    })
+                }
+            }
+        })
+        .collect();
+
+    let mut padding = vec![0; parts.len()];
+    let mut group: Vec<usize> = Vec::new();
+    let mut column = 0;
+    for (i, row) in rows.iter().enumerate() {
+        let Some(row) = row else {
+            group.clear();
+            continue;
+        };
+        let own = row.start + row.head;
+        let wider = column.max(own);
+        let continues = group.last().is_some_and(|&k| {
+            rows[k]
+                .as_ref()
+                .is_some_and(|prev| !prev.multi_line && prev.start == row.start)
+        });
+        let fits = |k: &usize| {
+            rows[*k]
+                .as_ref()
+                .is_some_and(|r| wider + r.after <= max_width)
+        };
+        if continues && row.adjacent && group.iter().chain(std::iter::once(&i)).all(fits) {
+            column = wider;
+            group.push(i);
+        } else {
+            group = vec![i];
+            column = own;
+        }
+        for &k in &group {
+            if let Some(r) = &rows[k] {
+                padding[k] = column - (r.start + r.head);
+            }
+        }
+    }
+    padding
+}
+
+/// The column of the line `doc` ends on, printed broken after its last line
+/// break, for a doc nested on lines indented `line_indent`. `None` if it has
+/// no line break.
+fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> Option<usize> {
+    fn walk(doc: &Doc<'_>, line_indent: usize, indent_width: usize, column: &mut Option<usize>) {
+        match doc {
+            Doc::Nil | Doc::BreakParent | Doc::LineSuffix(_) => {}
+            Doc::Text(text) => {
+                if let Some(c) = column {
+                    *c += width(text);
+                }
+            }
+            Doc::Verbatim(text) => match text.rfind(['\n', '\r']) {
+                Some(i) => *column = Some(width(&text[i + 1..])),
+                None => {
+                    if let Some(c) = column {
+                        *c += width(text);
+                    }
+                }
+            },
+            Doc::Line(_) => *column = Some(line_indent),
+            Doc::Concat(parts) => {
+                for part in parts {
+                    walk(part, line_indent, indent_width, column);
+                }
+            }
+            Doc::Nest(inner) => walk(inner, line_indent + indent_width, indent_width, column),
+            Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+                walk(inner, line_indent, indent_width, column);
+            }
+            Doc::IfBreak { broken, .. } => walk(broken, line_indent, indent_width, column),
+            Doc::Align(parts) => {
+                for doc in parts.iter().flat_map(AlignPart::docs) {
+                    walk(doc, line_indent, indent_width, column);
+                }
+            }
+        }
+    }
+    let mut column = None;
+    walk(doc, line_indent, indent_width, &mut column);
+    column
+}
+
 /// Whether `next`, printed in its mode, and then the rest of the current
-/// line fit in `room` columns.
+/// line fit in `room` columns. [`Doc::Align`] rows count unpadded.
 fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> bool {
     let mut stack = vec![(next.mode, next.doc)];
     let mut rest = rest.iter().rev();
@@ -409,12 +622,19 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
         if room < 0 {
             return false;
         }
-        let (mode, doc) = match stack.pop() {
+        let (mode, item) = match stack.pop() {
             Some(item) => item,
             None => match rest.next() {
                 Some(command) => (command.mode, command.doc),
                 None => return true,
             },
+        };
+        let doc = match item {
+            Item::Padding(spaces) => {
+                room -= spaces as isize;
+                continue;
+            }
+            Item::Doc(doc) => doc,
         };
         match doc {
             Doc::Nil | Doc::LineSuffix(_) => {}
@@ -429,13 +649,23 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             Doc::Line(_) if mode == Mode::Break => return true,
             Doc::Line(LineKind::Line) => room -= 1,
             Doc::Line(_) => {}
-            Doc::Concat(parts) => stack.extend(parts.iter().rev().map(|doc| (mode, doc))),
+            Doc::Concat(parts) => {
+                stack.extend(parts.iter().rev().map(|doc| (mode, Item::Doc(doc))));
+            }
             Doc::Nest(inner) | Doc::FromLineIndent(inner) | Doc::Group(inner) => {
-                stack.push((mode, inner));
+                stack.push((mode, Item::Doc(inner)));
             }
             Doc::IfBreak { broken, flat } => {
-                stack.push((mode, if mode == Mode::Break { broken } else { flat }));
+                let doc = if mode == Mode::Break { broken } else { flat };
+                stack.push((mode, Item::Doc(doc)));
             }
+            Doc::Align(parts) => stack.extend(
+                parts
+                    .iter()
+                    .flat_map(AlignPart::docs)
+                    .rev()
+                    .map(|doc| (mode, Item::Doc(doc))),
+            ),
         }
     }
 }
@@ -511,6 +741,76 @@ mod tests {
         let doc = (t("f(") + (Doc::softline() + args).nest() + Doc::softline() + t(")")).group();
         assert_eq!(at(80, &doc), "f(a, b)");
         assert_eq!(at(4, &doc), "f(\n  a,\n  b,\n)");
+    }
+
+    /// A row on its own line: `head` and `tail` split at a ` =>`.
+    fn row<'a>(head: &'a str, tail: Doc<'a>, adjacent: bool) -> AlignPart<'a> {
+        AlignPart::Row {
+            before: Doc::hardline(),
+            head: t(head),
+            tail: t(" =>") + tail,
+            adjacent,
+        }
+    }
+
+    fn cases(rows: Vec<AlignPart<'_>>) -> Doc<'_> {
+        t("{") + Doc::Align(rows).nest() + Doc::hardline() + t("}")
+    }
+
+    #[test]
+    fn align_lines_up_tails_after_the_widest_head() {
+        let doc = cases(vec![
+            row("case Some(x)", t(" x"), true),
+            row("case None", t(" 0"), true),
+        ]);
+        assert_eq!(
+            at(80, &doc),
+            "{\n  case Some(x) => x\n  case None    => 0\n}"
+        );
+    }
+
+    #[test]
+    fn align_starts_a_new_group_where_a_row_would_not_fit() {
+        let doc = cases(vec![
+            row("case LongPattern", t(" a"), true),
+            row("case B", t(" a long body"), true),
+        ]);
+        // Padded to the first row's arrow, the second line is 33 wide.
+        assert_eq!(
+            at(33, &doc),
+            "{\n  case LongPattern => a\n  case B           => a long body\n}"
+        );
+        assert_eq!(
+            at(32, &doc),
+            "{\n  case LongPattern => a\n  case B => a long body\n}"
+        );
+    }
+
+    #[test]
+    fn align_runs_end_at_rows_that_are_not_adjacent() {
+        let doc = cases(vec![
+            row("case Some(x)", t(" x"), true),
+            row("case None", t(" 0"), false),
+            row("case _", t(" 1"), true),
+        ]);
+        assert_eq!(
+            at(80, &doc),
+            "{\n  case Some(x) => x\n  case None => 0\n  case _    => 1\n}"
+        );
+    }
+
+    #[test]
+    fn align_a_broken_tail_aligns_its_first_line_and_ends_the_run() {
+        let body = (Doc::hardline() + t("two")).nest();
+        let doc = cases(vec![
+            row("case 1", t(" one"), true),
+            row("case 22", body, true),
+            row("case 333", t(" three"), true),
+        ]);
+        assert_eq!(
+            at(80, &doc),
+            "{\n  case 1  => one\n  case 22 =>\n    two\n  case 333 => three\n}"
+        );
     }
 
     #[test]
