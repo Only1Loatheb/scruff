@@ -1,5 +1,4 @@
 # Braced arguments become colon arguments, as SIP-44 allows in Scala 3.
-dialect = scala3
 
 <<< lambdas, blocks and cases
 val a = xs.map { x =>

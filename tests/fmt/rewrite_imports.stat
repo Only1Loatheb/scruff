@@ -31,10 +31,9 @@ object A {
   def f = { import d._; 1 }
 }
 >>>
-object A {
+object A:
   import b.c.*
   def f = { import d.*; 1 }
-}
 
 <<< comments stay where they are
 import a.{b /* x */ => c} // y

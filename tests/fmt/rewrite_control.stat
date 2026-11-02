@@ -24,7 +24,7 @@ def f =
   if c then a
   else b
 
-<<< braced bodies
+<<< braced bodies lose their braces
 if (c) {
   a
 } else {
@@ -34,25 +34,21 @@ while (c) {
   x
 }
 >>>
-if c then {
-  a
-} else {
-  b
-}
-while c do {
+if c then a
+else b
+while c do
   x
-}
 
-<<< for braces stay
+<<< for braces go
 for {
   x <- xs
   y <- ys
 } yield x + y
 >>>
-for {
+for
   x <- xs
   y <- ys
-} yield x + y
+yield x + y
 
 <<< a condition starting with a parenthesis is left as written
 if ((a, b) == c) d
@@ -150,8 +146,6 @@ def f =
   else c
 
 <<< a single expression goes on its keyword's line if it fits
-dialect = scala3
-===
 def f =
   if c then
     a

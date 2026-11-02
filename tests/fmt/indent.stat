@@ -2,6 +2,8 @@
 # that opens it, and every line inside moves by as much as its statement.
 
 <<< braces get two spaces per level
+dialect = scala213
+===
 object A {
     def f = {
             g(1)
@@ -15,8 +17,6 @@ object A {
 }
 
 <<< Scala 3 regions get two spaces per level
-dialect = scala3
-===
 object A:
     def f =
           g(1)
@@ -26,6 +26,8 @@ object A:
     g(1)
 
 <<< continuation lines keep their shape
+dialect = scala213
+===
 object A {
     val x = a +
         b +
@@ -39,6 +41,8 @@ object A {
 }
 
 <<< a body is indented from the first line of its definition
+dialect = scala213
+===
 class Cache[K, V](size: Int)
     extends Base
     with Logging {
@@ -52,6 +56,8 @@ class Cache[K, V](size: Int)
 }
 
 <<< a lambda body is indented from the line with its arrow
+dialect = scala213
+===
 object A {
   val ys = xs
     .map { x =>
@@ -67,8 +73,6 @@ object A {
 }
 
 <<< cases are indented from the start of their match
-dialect = scala3
-===
 object A:
   def f(c: Boolean) =
     (if c then a
@@ -84,8 +88,6 @@ object A:
       case _ => other
 
 <<< cases written at the width of their match stay there
-dialect = scala3
-===
 object A:
   def f(x: Int) =
     x match
@@ -99,6 +101,8 @@ object A:
     case _ => other
 
 <<< a Scaladoc moves with its definition
+dialect = scala213
+===
 object A {
     /** Does it.
       *
@@ -116,6 +120,8 @@ object A {
 }
 
 <<< comments at column 0 move in with the code
+dialect = scala213
+===
 object A {
 // note
     def f = 1
@@ -127,6 +133,8 @@ object A {
 }
 
 <<< a block whose statements disagree moves with the block around it
+dialect = scala213
+===
 object A {
     def f = {
         a
@@ -142,6 +150,8 @@ object A {
 }
 
 <<< strings keep their lines
+dialect = scala213
+===
 object A {
     val s = """
       |text
@@ -155,8 +165,6 @@ object A {
 }
 
 <<< a body stays indented from its `if` when a rule breaks the condition
-dialect = scala3
-===
 def f =
   if alpha && beta && gamma && delta && epsilon && zeta && eta && theta && iota && kappa && lambda then
     one()
@@ -184,6 +192,8 @@ def f =
     four
 
 <<< a block follows its `{` to the line a joined list ends on
+dialect = scala213
+===
 def f =
   run(
     alpha,

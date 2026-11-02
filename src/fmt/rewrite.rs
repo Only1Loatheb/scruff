@@ -1201,13 +1201,7 @@ mod tests {
     use super::*;
     use crate::lossless_tree::parse;
 
-    /// Scala 3 with braces kept, for the rewrites besides theirs.
-    const NEW: Dialect = Dialect {
-        significant_indentation: false,
-        fewer_braces: false,
-        ..Dialect::SCALA3
-    };
-    const SCALA3: Dialect = Dialect::SCALA3;
+    const NEW: Dialect = Dialect::SCALA3;
     const OLD: Dialect = Dialect {
         star_wildcard_import: false,
         as_for_import_rename: false,
@@ -1241,7 +1235,7 @@ mod tests {
         assert_eq!(rewritten("export a._\n", NEW), "export a.*\n");
         assert_eq!(
             rewritten("object A {\n  import b.c._\n}\n", NEW),
-            "object A {\n  import b.c.*\n}\n"
+            "object A:\n  import b.c.*\n"
         );
     }
 
@@ -1391,7 +1385,6 @@ mod tests {
                 "def f =\n  if (c)\n    a\n  else\n    b\n",
                 "def f =\n  if c then\n    a\n  else\n    b\n",
             ),
-            ("if (c) {\n  a\n}\n", "if c then {\n  a\n}\n"),
         ] {
             assert_eq!(rewritten(old, NEW), new, "{old}");
             assert_eq!(rewritten(new, OLD), old, "{new}");
@@ -1402,6 +1395,8 @@ mod tests {
             "if a /* x */ then b\n"
         );
         assert_eq!(changed("if a /* x */ then b\n", OLD), None);
+        // Braces go with the parentheses.
+        assert_eq!(rewritten("if (c) {\n  a\n}\n", NEW), "if c then\n  a\n");
         // Written without spaces.
         assert_eq!(rewritten("if(c)a\n", NEW), "if c then a\n");
         assert_eq!(rewritten("while(c){x}\n", NEW), "while c do {x}\n");
@@ -1412,10 +1407,10 @@ mod tests {
             rewritten("for (x <- xs) do f(x)\n", OLD),
             "for (x <- xs) f(x)\n"
         );
-        // Braces stay in Scala 3, and come back in Scala 2 for a `for`
-        // over several lines.
+        // Braces go in Scala 3, and come back in Scala 2 for a `for` over
+        // several lines.
         let braced = "for {\n  x <- xs\n  y <- ys\n} yield x\n";
-        assert_eq!(changed(braced, NEW), None);
+        assert_eq!(rewritten(braced, NEW), "for\n  x <- xs\n  y <- ys\nyield x\n");
         assert_eq!(
             rewritten("for\n  x <- xs\n  y <- ys\nyield x\n", OLD),
             braced
@@ -1436,13 +1431,15 @@ mod tests {
             "while ({\n  a\n  b\n}) ()\n",
             "do x while (c)\n",
             // What tree-sitter-scala would read differently.
-            "for (x <- xs) x match {\n  case _ =>\n}\n",
         ] {
             assert_eq!(changed(source, NEW), None, "{source}");
         }
+        // The `match` loses its braces, but the `for` stays as written.
+        let changed_for = changed("for (x <- xs) x match {\n  case _ =>\n}\n", NEW);
+        assert!(changed_for.is_none_or(|c| c.starts_with("for (x <- xs) x match")));
         // Written with indentation, so in full Scala 3.
         assert_eq!(
-            changed("def f =\n  if (c)\n    a\n  end if\n", SCALA3),
+            changed("def f =\n  if (c)\n    a\n  end if\n", NEW),
             None
         );
         // Neither `if`: the outer one would take the `else`.
@@ -1499,7 +1496,7 @@ mod tests {
             // Old control syntax becomes new too.
             ("if (c) {\n  a\n}\n", "if c then\n  a\n"),
         ] {
-            assert_eq!(rewritten(old, SCALA3), new, "{old}");
+            assert_eq!(rewritten(old, NEW), new, "{old}");
             assert_eq!(
                 crate::lossless_tree::check_equivalent(old, new),
                 Ok(()),
@@ -1532,7 +1529,7 @@ mod tests {
             "new A {\n  val x = 1\n}\n",
             "val x = {\n  a\n}\n".replace("val x = ", "{\n").as_str(),
         ] {
-            let changed = changed(source, SCALA3);
+            let changed = changed(source, NEW);
             assert!(
                 changed
                     .as_deref()
@@ -1540,7 +1537,8 @@ mod tests {
                 "{source:?} became {changed:?}"
             );
         }
-        assert_eq!(changed("class A {\n  val x = 1\n}\n", NEW), None);
+        let source3 = Dialect::named("scala213source3").unwrap();
+        assert_eq!(changed("class A {\n  val x = 1\n}\n", source3), None);
     }
 
     #[test]
@@ -1579,10 +1577,7 @@ mod tests {
 
     #[test]
     fn fewer_braces() {
-        let fewer = Dialect {
-            fewer_braces: true,
-            ..NEW
-        };
+        let fewer = NEW;
         for (braced, colon) in [
             ("xs.map { x =>\n  a\n  b\n}\n", "xs.map: x =>\n  a\n  b\n"),
             ("xs.map { (x, y) =>\n  a\n}\n", "xs.map: (x, y) =>\n  a\n"),

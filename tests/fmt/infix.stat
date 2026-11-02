@@ -63,6 +63,8 @@ assert(
 )
 
 <<< indentation starts from the line the chain is on
+dialect = scala213
+===
 object A {
   def ok = alpha && beta && gamma && delta
 }

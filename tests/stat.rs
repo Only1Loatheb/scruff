@@ -20,10 +20,8 @@
 //! Each case also checks that formatting the expected output leaves it
 //! unchanged.
 //!
-//! The dialect is Scala 3 without significant indentation or fewer braces,
-//! which keeps braces, as scalafmt does, so that cases written with braces test their
-//! layout. Cases written with Scala 3's indentation name `dialect = scala3`,
-//! which would otherwise get braces.
+//! The dialect is scuff's default, `scala3`, unless the file or case names
+//! another.
 
 use std::path::{Path, PathBuf};
 
@@ -86,14 +84,7 @@ fn parse_file(file: &Path) -> Vec<Case> {
         .filter(|&i| lines[i].starts_with("<<<"))
         .collect();
 
-    let mut defaults = FormatOptions {
-        dialect: Dialect {
-            significant_indentation: false,
-            fewer_braces: false,
-            ..Dialect::SCALA3
-        },
-        ..FormatOptions::default()
-    };
+    let mut defaults = FormatOptions::default();
     let header_end = starts.first().copied().unwrap_or(lines.len());
     apply_settings(&mut defaults, &lines[..header_end], file, 1);
 

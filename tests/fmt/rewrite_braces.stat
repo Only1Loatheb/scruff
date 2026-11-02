@@ -1,5 +1,4 @@
 # Braces become indentation where Scala 3 allows it.
-dialect = scala3
 
 <<< class, object and definition bodies
 object A {

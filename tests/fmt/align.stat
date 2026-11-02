@@ -10,6 +10,8 @@
 maxColumn = 80
 
 <<< arrows line up after the longest pattern
+dialect = scala213
+===
 x match {
   case Some(value) => value
   case None => 0
@@ -21,6 +23,8 @@ x match {
 }
 
 <<< guards count as part of the pattern
+dialect = scala213
+===
 x match {
   case n if n > 0 => "positive"
   case 0 => "zero"
@@ -34,6 +38,8 @@ x match {
 }
 
 <<< a blank line starts a new run
+dialect = scala213
+===
 x match {
   case Some(value) => value
 
@@ -49,6 +55,8 @@ x match {
 }
 
 <<< a comment starts a new run
+dialect = scala213
+===
 x match {
   case Some(value) => value
   // the rest
@@ -62,6 +70,8 @@ x match {
 }
 
 <<< a clause over several lines aligns its first line, then ends the run
+dialect = scala213
+===
 x match {
   case 1 => one
   case 22 =>
@@ -79,8 +89,6 @@ x match {
 }
 
 <<< Scala 3 indented cases
-dialect = scala3
-===
 def f(x: Option[Int]) =
   x match
     case Some(value) => value
@@ -92,6 +100,8 @@ def f(x: Option[Int]) =
     case None        => 0
 
 <<< a partial function in braces
+dialect = scala213
+===
 val ys = xs.collect {
   case Some(value) => value
   case None => 0
@@ -103,6 +113,8 @@ val ys = xs.collect {
 }
 
 <<< a trailing comment counts toward the width, as in scalafmt
+dialect = scala213
+===
 x match {
   case Some(value) => value
   case Some(value: Long) => compute(value)
@@ -116,6 +128,7 @@ x match {
 }
 
 <<< a clause that would go past the width starts a new group
+dialect = scala213
 maxColumn = 40
 ===
 x match {
@@ -258,10 +271,9 @@ xs match {
 xs match {
   case Nil      => "empty"
   case x :: xs1 => "nonempty"
-} match {
+} match
   case "empty"    => 0
   case "nonempty" => 1
-}
 
 <<< simple pattern (scala3/Macro.stat:70)
    body match    {  
@@ -271,16 +283,13 @@ xs match {
       case body => body
    }
 >>>
-body match {
+body match
   case '{ sum() }                    => Expr(0)
   case '{ sum($n) }                  => n
   case '{ sum(${ Varargs(args) }*) } => sumExpr(args)
   case body                          => body
-}
 
 <<< complex (scala3/InlineTransparent.stat:94)
-dialect = scala3
-===
 inline def repro[T <: Int with Singleton  ,   U <: Int with Singleton]: Int = 
   inline erasedValue[T] match
      case _: 5 => 5

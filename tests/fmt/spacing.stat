@@ -47,8 +47,6 @@ def + : Int = 1
 def + : Int = 1
 
 <<< a quoted wildcard keeps its space before a colon
-dialect = scala3
-===
 def f(x: Expr[Any]) = x match
   case '{ $_ : Boolean } => 1
 >>>
@@ -75,6 +73,8 @@ def extension (a: Int) = a
 def extension(a: Int) = a
 
 <<< a backticked name starting a line keeps its gap
+dialect = scala213
+===
 object O {
   {
     `$`{e}
@@ -117,6 +117,7 @@ extension (a: A) { def add1(b: A) = a + b; def add2(b: A) = a + b }
 
 
 <<< extension soft apply (scala3/Extension.stat:104)
+dialect = scala213
 maxColumn = 40
 ===
 object A{
@@ -131,6 +132,7 @@ object A {
 
 
 <<< enum case with type parameters (scala3/Enum.stat:287)
+dialect = scala213
 maxColumn = 80
 ===
 enum Enum4 [ + T] {

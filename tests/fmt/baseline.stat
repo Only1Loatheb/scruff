@@ -1,4 +1,6 @@
 <<< scala 2 code is unchanged
+dialect = scala213
+===
 package a.b
 
 import x.{ y, z }
@@ -26,8 +28,6 @@ class A(x: Int) extends B {
 }
 
 <<< scala 3 code is unchanged
-dialect = scala3
-===
 enum Color:
   case Red, Green
 
@@ -80,8 +80,6 @@ val x = <a href="y">  text {1 + 2}</a>
 val x = <a href="y">  text {1 + 2}</a>
 
 <<< region tree-sitter misparses is copied
-dialect = scala3
-===
 object O:
   def g =
     a getOrElse

@@ -18,9 +18,8 @@ x match {
   case _: List[_] => 1
 }
 >>>
-x match {
+x match
   case _: List[?] => 1
-}
 
 <<< type parameters keep `_`
 def f[F[_]](x: F[Int]) = x
@@ -55,10 +54,9 @@ x match {
 >>>
 f(xs*)
 g(a, h(b)*)
-x match {
+x match
   case Seq(a, xs*) => 1
   case Seq(_*)     => 2
-}
 
 <<< plain Scala 2.13 gets its vararg splices back
 dialect = scala213

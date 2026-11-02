@@ -32,6 +32,8 @@ val a = 1
 val b = 2
 
 <<< definitions in a template may have two
+dialect = scala213
+===
 object A {
   val a = 1
 
@@ -47,6 +49,8 @@ object A {
 }
 
 <<< in a method body, at most one in a row
+dialect = scala213
+===
 object A {
   def f = {
     val a = 1
@@ -72,6 +76,8 @@ object A {
 }
 
 <<< a nested object is a template too
+dialect = scala213
+===
 object A {
   object B {
     val c = 1
@@ -91,8 +97,6 @@ object A {
 }
 
 <<< a nested function is inside too
-dialect = scala3
-===
 object A:
   def f =
     def g = 1
@@ -122,6 +126,8 @@ val a = 1
 val b = 2
 
 <<< blank lines inside braces stay
+dialect = scala213
+===
 object A {
 
   val a = 1

@@ -60,6 +60,8 @@ val y = outer(
 )
 
 <<< indentation starts from the line the list is on
+dialect = scala213
+===
 object A {
   def f = {
     compute(alpha, beta, gamma, delta, e)
@@ -145,8 +147,6 @@ val z = foo(
 val z = foo(x => x + 1)
 
 <<< a for expression over several lines keeps the list as written
-dialect = scala3
-===
 class A:
   given a: Arb[C] = Arb(
     for n <- Gen.alphaStr
@@ -160,8 +160,6 @@ class A:
   )
 
 <<< a block after a list over several lines is indented from the line it ends up on
-dialect = scala3
-===
 def test() =
   fn2(
       arg = "blue sleeps faster than tuesday",
@@ -178,6 +176,8 @@ def test() =
     println(x)
 
 <<< an item over several lines keeps the list as written
+dialect = scala213
+===
 val x = f(a,
   g {
     b
@@ -215,8 +215,6 @@ type T[X,] = X
 type T[X,] = X
 
 <<< inside a Scala 3 indentation region
-dialect = scala3
-===
 def f =
   val x = compute(alpha, beta, gamma, delta)
   x
@@ -281,11 +279,15 @@ val ys = xs.map(x =>
 )
 
 <<< a lambda in braces that fits stays on one line
+dialect = scala213
+===
 val ys = xs.map { x => x + 1 }
 >>>
 val ys = xs.map { x => x + 1 }
 
 <<< a lambda in braces breaks before its body
+dialect = scala213
+===
 val ys = xs.map { x => compute(x, alpha, b) }
 >>>
 val ys = xs.map { x =>
@@ -293,6 +295,8 @@ val ys = xs.map { x =>
 }
 
 <<< a boolean body in braces moves as a whole first
+dialect = scala213
+===
 val ys = xs.filter { x => x > lo && x < hi1 }
 >>>
 val ys = xs.filter { x =>
@@ -300,6 +304,8 @@ val ys = xs.filter { x =>
 }
 
 <<< a body ending in a call, which keeps one space before the brace when flat
+dialect = scala213
+===
 val ys = xs.map { x => f(x, alpha, beta, gamma, delta) }
 val zs = xs.map { x => f(x) }
 >>>
@@ -309,6 +315,8 @@ val ys = xs.map { x =>
 val zs = xs.map { x => f(x) }
 
 <<< case clauses are left alone; a block holding one expression breaks the same way
+dialect = scala213
+===
 val ys = xs.map { case (k, v) => k + v + other }
 val y = g { compute(alpha, beta, gamma, delta1) }
 >>>
@@ -318,6 +326,8 @@ val y = g {
 }
 
 <<< nested lambdas in braces: the outer one breaks first
+dialect = scala213
+===
 val a = reify { reify { x } }
 val ys = xs.flatMap { x => ys.map { y => combine(x, y) } }
 >>>

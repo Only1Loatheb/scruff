@@ -58,6 +58,8 @@ val ys = Generator.string(
 )
 
 <<< a block argument in a chain
+dialect = scala213
+===
 val ys = xs.map { x => x + 1 }.filter(good1)
 >>>
 val ys = xs
@@ -118,6 +120,8 @@ val ys = xs
   .take(n)
 
 <<< a chain with a part over several lines keeps its line breaks
+dialect = scala213
+===
 val ys = xs
   .map { x =>
     x + 1
