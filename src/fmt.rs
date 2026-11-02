@@ -112,27 +112,35 @@ fn format_with(
 ) -> Result<String, FormatError> {
     let original = parse(source);
     let (once, once_tree) = format_once(&original, options, rules, style)?;
+    if once == source {
+        return Ok(once);
+    }
+    let once_tree = once_tree.as_ref().unwrap_or(&original);
     // Breaking a line can leave something to rewrite, as braces around a
     // block that no longer fits on one: a second pass rewrites it, so that
     // formatting the result changes nothing.
-    if once != source
-        && rewrite::changes(&once_tree, options.dialect)
-        && let Ok((twice, twice_tree)) = format_once(&once_tree, options, rules, style)
-        && check_equivalent_trees(&original, &twice_tree).is_ok()
+    if rewrite::changes(once_tree, options.dialect)
+        && let Ok((twice, twice_tree)) = format_once(once_tree, options, rules, style)
+        && twice_tree.is_none_or(|tree| check_equivalent_trees(&original, &tree).is_ok())
     {
         return Ok(twice);
     }
     Ok(once)
 }
 
-/// One formatting pass over `original`, already parsed: the text and its
-/// tree, checked against the original.
+/// One formatting pass over `original`, already parsed: the text, checked
+/// against the original, and its tree, or `None` where the text is
+/// `original`'s own.
+///
+/// A text is parsed only when it's new. Where formatting gives back the
+/// text a tree was parsed from, the original or the rewrite, that tree is
+/// the text's, and has been checked already.
 fn format_once(
     original: &Tree,
     options: &FormatOptions,
     rules: Rules,
     style: Style,
-) -> Result<(String, Tree), FormatError> {
+) -> Result<(String, Option<Tree>), FormatError> {
     if !original.errors().is_empty() {
         return Err(FormatError::SyntaxErrors(original.errors().to_vec()));
     }
@@ -148,9 +156,12 @@ fn format_once(
     let layout = indent::Layout::new(tree, &relaid_lists(tree, rules, style));
     let reindented = !layout.is_empty();
     let formatted = print(&build_doc(tree, rules, style, layout), &print_options);
+    if formatted == tree.syntax().text() {
+        return Ok((formatted, rewritten));
+    }
     let formatted_tree = parse(&formatted);
     match check_equivalent_trees(original, &formatted_tree) {
-        Ok(()) => Ok((formatted, formatted_tree)),
+        Ok(()) => Ok((formatted, Some(formatted_tree))),
         // Where tree-sitter-scala reads the layout differently from scalac,
         // moving lines can change the tree. Keep the indentation as written
         // then, and the rest of the formatting.
@@ -160,7 +171,7 @@ fn format_once(
             let formatted_tree = parse(&formatted);
             check_equivalent_trees(original, &formatted_tree)
                 .map_err(FormatError::NotEquivalent)?;
-            Ok((formatted, formatted_tree))
+            Ok((formatted, Some(formatted_tree)))
         }
         Err(difference) => Err(FormatError::NotEquivalent(difference)),
     }
