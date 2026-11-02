@@ -26,8 +26,8 @@
 //!   form: regexes that must match somewhere in the path. Include filters
 //!   replace the default include paths unless those are set as well.
 //! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
-//!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard` and
-//!   `allowPostfixStarVarargSplices`, also under `fileOverride`, whose patterns
+//!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard`,
+//!   `allowPostfixStarVarargSplices` and `allowQuietSyntax`, also under `fileOverride`, whose patterns
 //!   are tried longest first, as in scalafmt. The dialect is `scala3` when
 //!   none is named.
 
@@ -77,6 +77,9 @@ pub struct Dialect {
     pub question_mark_type_wildcard: bool,
     /// `f(xs*)` for `f(xs: _*)`, and `case Seq(xs*)` for `case Seq(xs @ _*)`.
     pub postfix_star_vararg_splices: bool,
+    /// `if c then a` for `if (c) a`, `while c do x` for `while (c) x`, and
+    /// `for x <- xs do f(x)` for `for (x <- xs) f(x)`. Only Scala 3's.
+    pub quiet_syntax: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -95,16 +98,19 @@ impl Dialect {
         as_for_import_rename: true,
         question_mark_type_wildcard: true,
         postfix_star_vararg_splices: true,
+        quiet_syntax: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
     /// `scala213source3` or `scala212source3` (Scala 2 with `-Xsource:3`),
     /// `sbt1` (sbt 1's build files, which allow the same), or `scala213`.
     pub fn named(name: &str) -> Option<Dialect> {
-        // Scala 3's imports are in Scala 2 with `-Xsource:3` too.
-        let new_syntax = match name.to_ascii_lowercase().as_str() {
-            "scala3" | "scala213source3" | "scala212source3" | "sbt1" => true,
-            "scala213" => false,
+        // Scala 3's imports, wildcards and splices are in Scala 2 with
+        // `-Xsource:3` too, but not its control syntax.
+        let (new_syntax, scala3) = match name.to_ascii_lowercase().as_str() {
+            "scala3" => (true, true),
+            "scala213source3" | "scala212source3" | "sbt1" => (true, false),
+            "scala213" => (false, false),
             _ => return None,
         };
         Some(Dialect {
@@ -112,6 +118,7 @@ impl Dialect {
             as_for_import_rename: new_syntax,
             question_mark_type_wildcard: new_syntax,
             postfix_star_vararg_splices: new_syntax,
+            quiet_syntax: scala3,
         })
     }
 }
@@ -125,6 +132,7 @@ struct DialectSetting {
     as_for_import_rename: Option<bool>,
     question_mark_type_wildcard: Option<bool>,
     postfix_star_vararg_splices: Option<bool>,
+    quiet_syntax: Option<bool>,
 }
 
 impl DialectSetting {
@@ -148,6 +156,9 @@ impl DialectSetting {
         }
         if let Some(allow) = self.postfix_star_vararg_splices {
             dialect.postfix_star_vararg_splices = allow;
+        }
+        if let Some(allow) = self.quiet_syntax {
+            dialect.quiet_syntax = allow;
         }
         Ok(dialect)
     }
@@ -188,6 +199,9 @@ impl DialectSetting {
             }
             if let Some(allow) = flag("allowPostfixStarVarargSplices")? {
                 setting.postfix_star_vararg_splices = Some(allow);
+            }
+            if let Some(allow) = flag("allowQuietSyntax")? {
+                setting.quiet_syntax = Some(allow);
             }
         }
         Ok(setting)
@@ -830,18 +844,24 @@ mod tests {
             as_for_import_rename: true,
             question_mark_type_wildcard: true,
             postfix_star_vararg_splices: true,
+            quiet_syntax: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
             as_for_import_rename: false,
             question_mark_type_wildcard: false,
             postfix_star_vararg_splices: false,
+            quiet_syntax: false,
+        };
+        let source3 = Dialect {
+            quiet_syntax: false,
+            ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));
-        assert_eq!(Dialect::named("Scala213Source3"), Some(new));
-        assert_eq!(Dialect::named("scala212source3"), Some(new));
+        assert_eq!(Dialect::named("Scala213Source3"), Some(source3));
+        assert_eq!(Dialect::named("scala212source3"), Some(source3));
         assert_eq!(Dialect::named("scala213"), Some(old));
-        assert_eq!(Dialect::named("sbt1"), Some(new));
+        assert_eq!(Dialect::named("sbt1"), Some(source3));
         // Only these five.
         for other in ["scala33", "scala212", "sbt0137", "scala4"] {
             assert_eq!(Dialect::named(other), None, "{other}");
@@ -884,6 +904,8 @@ mod tests {
         assert!(!dialect("/p/a.sc").question_mark_type_wildcard);
         assert!(!dialect("/p/a.sc").postfix_star_vararg_splices);
         assert!(dialect("/p/a.scala").postfix_star_vararg_splices);
+        assert!(dialect("/p/a.scala").quiet_syntax);
+        assert!(!dialect("/p/src/test/scala-2/A.scala").quiet_syntax);
         // With no file, the dialect no pattern changes.
         assert_eq!(c.dialect_for(None), base);
     }
@@ -932,11 +954,17 @@ mod tests {
         if cats.join(SCALAFMT_FILE).is_file() {
             let config = Config::load(&cats.join(SCALAFMT_FILE)).unwrap();
             let dialect = |p: &str| config.dialect_for(Some(&cats.join(p)));
-            // `as` is turned off everywhere, `*` allowed everywhere.
+            // `as` is turned off everywhere, `*` allowed everywhere, and
+            // Scala 3's control syntax only in `scala-3`.
             let main = dialect("core/src/main/scala/cats/Functor.scala");
             assert!(main.star_wildcard_import && !main.as_for_import_rename);
+            assert!(!main.quiet_syntax);
             assert_eq!(dialect("core/src/main/scala-2.12/cats/A.scala"), main);
-            assert_eq!(dialect("core/src/test/scala-3/cats/A.scala"), main);
+            let scala3 = Dialect {
+                quiet_syntax: true,
+                ..main
+            };
+            assert_eq!(dialect("core/src/test/scala-3/cats/A.scala"), scala3);
             assert_eq!(dialect("build.sbt"), main);
         }
         if found > 0 {

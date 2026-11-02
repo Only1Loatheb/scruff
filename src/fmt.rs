@@ -1738,6 +1738,12 @@ mod tests {
                                 ))
                             || matches!(n.kind(), SyntaxKind::Vararg | SyntaxKind::RepeatPattern)
                                 && rewrite::splice(&out, *n, new).is_some()
+                            || matches!(
+                                n.kind(),
+                                SyntaxKind::IfExpression
+                                    | SyntaxKind::WhileExpression
+                                    | SyntaxKind::ForExpression
+                            ) && rewrite::control(&out, *n, dialect.quiet_syntax).is_some()
                     });
                     // Unless it's copied verbatim, as in `format: off`.
                     if let Some(node) =

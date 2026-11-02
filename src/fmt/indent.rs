@@ -490,13 +490,14 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
             None if node.text_range().start() <= opener.text_range().start() => {
                 ((node, Frame::AfterLeading), opener)
             }
-            None => (
-                owner_frame(node, opener).unwrap_or((
-                    opener.parent()?,
-                    Frame::At(opener.text_range().start(), last.text_range().end()),
-                )),
-                opener,
-            ),
+            None => match owner_frame(node, opener) {
+                Some(frame) => (frame, opener),
+                None => {
+                    let (owner, from) = opener_frame(node, opener)?;
+                    let frame = Frame::At(from.text_range().start(), last.text_range().end());
+                    ((owner, frame), first_token(&from).unwrap_or(opener))
+                }
+            },
         };
         let inner = TextRange::new(opener.text_range().end(), last.text_range().end());
         return Some(Container {
@@ -571,6 +572,24 @@ fn owner_frame<'t>(
     let between = &owner.text()[usize::from(start.text_range().start() - base)
         ..usize::from(opener.text_range().start() - base)];
     (!between.contains('\n')).then_some((owner, Frame::AfterLeading))
+}
+
+/// For a region framed from its opener, the node around both and its child
+/// holding the opener, where the frame starts: the condition `(c)` for the
+/// `)` before an `if`'s body, so the body is placed from the line the
+/// condition starts on, not the one it ends on.
+fn opener_frame<'t>(
+    node: SyntaxNode<'t>,
+    opener: SyntaxToken<'t>,
+) -> Option<(SyntaxNode<'t>, SyntaxElement<'t>)> {
+    let mut child = NodeOrToken::Token(opener);
+    loop {
+        let parent = child.parent()?;
+        if parent.text_range().contains_range(node.text_range()) {
+            return Some((parent, child));
+        }
+        child = NodeOrToken::Node(parent);
+    }
 }
 
 /// For the body of a definition, a class body or `case` clauses, the first

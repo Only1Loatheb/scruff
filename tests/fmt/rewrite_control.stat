@@ -1,0 +1,88 @@
+# Scala 3's control syntax: `if c then`, `while c do` and `for ... do`,
+# without parentheses. Only Scala 3 has it; the dialect is Scala 3 unless a
+# case names another.
+
+<<< if, while and for
+if (a) b else if (c) d else e
+while (x > 0) x -= 1
+for (x <- xs) println(x)
+for (x <- xs; y <- ys) yield x + y
+>>>
+if a then b else if c then d else e
+while x > 0 do x -= 1
+for x <- xs do println(x)
+for x <- xs; y <- ys yield x + y
+
+<<< bodies on their own lines
+def f =
+  if (c)
+    a
+  else
+    b
+>>>
+def f =
+  if c then
+    a
+  else
+    b
+
+<<< braced bodies
+if (c) {
+  a
+} else {
+  b
+}
+while (c) {
+  x
+}
+>>>
+if c then {
+  a
+} else {
+  b
+}
+while c do {
+  x
+}
+
+<<< for braces stay
+for {
+  x <- xs
+  y <- ys
+} yield x + y
+>>>
+for {
+  x <- xs
+  y <- ys
+} yield x + y
+
+<<< a condition starting with a parenthesis is left as written
+if ((a, b) == c) d
+>>>
+if ((a, b) == c) d
+
+<<< Scala 2 with -Xsource:3 keeps the parentheses
+dialect = scala213source3
+===
+if (a) b
+>>>
+if (a) b
+
+<<< plain Scala 2.13 gets its parentheses back
+dialect = scala213
+===
+if a then b else c
+while c do x
+for x <- xs do println(x)
+for
+  x <- xs
+  y <- ys
+yield x + y
+>>>
+if (a) b else c
+while (c) x
+for (x <- xs) println(x)
+for {
+  x <- xs
+  y <- ys
+} yield x + y

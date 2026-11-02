@@ -86,7 +86,7 @@ val ys = xs
 <<< in an if expression
 val x = if (a)  /* yes */ b else  /* no */  c
 >>>
-val x = if (a) /* yes */ b else /* no */ c
+val x = if a then /* yes */ b else /* no */ c
 
 <<< after an opening brace and before a closing one
 object A {  // note
@@ -153,7 +153,7 @@ val y = f(/* a */x/* b */)
 def g /* a */ = 1
 class A extends B with /* b */ C
 val m: Map[String, /* v */ Int] = Map()
-val x = if (a) b else /* no */ c
+val x = if a then b else /* no */ c
 val y = f( /* a */ x /* b */ )
 
 <<< no space between a comment and a following comma, semicolon or colon

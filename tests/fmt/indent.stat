@@ -184,3 +184,24 @@ def f =
   run(alpha, beta).map { x =>
     x + 1
   }
+
+<<< a body after a broken condition is placed from the condition's line
+dialect = scala213
+===
+object A {
+  def f = x match {
+    case ref =>
+      if (currentOwner.enclosingMethodOrClassOrObject.isProperlyContainedIn(refSym.enclosingMethodOrClassOrObject.fooooo))
+        report.error(pos)
+  }
+}
+>>>
+object A {
+  def f = x match {
+    case ref =>
+      if (currentOwner.enclosingMethodOrClassOrObject.isProperlyContainedIn(
+        refSym.enclosingMethodOrClassOrObject.fooooo
+      ))
+        report.error(pos)
+  }
+}

@@ -17,7 +17,9 @@
 //! in an import or export, and braces around a lone rename mean nothing,
 //! `import a.b as c` as `import a.{b => c}`. A type wildcard `?` means the
 //! same as `_`: `List[?]` as `List[_]`. A vararg splice `xs*` means the same
-//! as `xs: _*`, and in a pattern as `xs @ _*`.
+//! as `xs: _*`, and in a pattern as `xs @ _*`. And Scala 3's control syntax means
+//! the same as the old: `if c then a` as `if (c) a`, `while c do x` as
+//! `while (c) x`, and `for x <- xs do f(x)` as `for (x <- xs) f(x)`.
 
 use std::fmt;
 
@@ -172,15 +174,18 @@ fn is_type_wildcard_token(token: &SyntaxToken<'_>) -> bool {
     }
 }
 
-/// A token's field, or, where the node around it is skipped, the node's.
-fn token_field(token: &SyntaxToken<'_>) -> Option<&'static str> {
-    match token.parent() {
-        Some(parent) if token.text() == "_" && is_type_wildcard_node(&parent) => {
+/// An element's field, or, where the node around it is skipped, the
+/// node's: `c` in `if (c) a` is the condition, as in `if c then a`.
+fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
+    match element.parent() {
+        Some(parent)
+            if is_condition_parens(&parent)
+                || is_type_wildcard_node(&parent)
+                || is_old_splice_node(&parent) =>
+        {
             parent.field_name()
         }
-        // `xs` in `xs @ _*` is the pattern of `xs*`.
-        Some(parent) if is_old_splice_node(&parent) => parent.field_name(),
-        _ => token.field_name(),
+        _ => element.field_name(),
     }
 }
 
@@ -196,13 +201,14 @@ impl Step<'_> {
     fn same_as(&self, other: &Step<'_>) -> bool {
         match (self, other) {
             (Step::Enter(a), Step::Enter(b)) => {
-                new_kind(a.kind()) == new_kind(b.kind()) && a.field_name() == b.field_name()
+                new_kind(a.kind()) == new_kind(b.kind())
+                    && field(NodeOrToken::Node(*a)) == field(NodeOrToken::Node(*b))
             }
             (Step::Leave(a), Step::Leave(b)) => new_kind(a.kind()) == new_kind(b.kind()),
             (Step::Token(a), Step::Token(b)) => {
                 new_token(a) == new_token(b)
                     && a.is_missing() == b.is_missing()
-                    && token_field(a) == token_field(b)
+                    && field(NodeOrToken::Token(*a)) == field(NodeOrToken::Token(*b))
             }
             _ => false,
         }
@@ -242,7 +248,8 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
             if is_transparent_block(&node)
                 || is_lone_rename_braces(&node)
                 || is_type_wildcard_node(&node)
-                || is_old_splice_node(&node) =>
+                || is_old_splice_node(&node)
+                || is_condition_parens(&node) =>
         {
             None
         }
@@ -257,7 +264,45 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
 /// A token that means nothing, so it may come or go: a trailing comma,
 /// braces around a lone rename, and `: _` or `@ _` in a vararg splice.
 fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
-    is_trailing_comma(token) || is_lone_rename_brace(token) || is_old_splice_token(token)
+    is_trailing_comma(token)
+        || is_lone_rename_brace(token)
+        || is_old_splice_token(token)
+        || is_control_token(token)
+}
+
+/// The parentheses around an `if` or `while` condition, as in `if (c) a`,
+/// which Scala 3 may leave out: `if c then a`.
+fn is_condition_parens(node: &SyntaxNode<'_>) -> bool {
+    node.kind() == SyntaxKind::ParenthesizedExpression
+        && node.field_name() == Some("condition")
+        && node.parent().is_some_and(|p| {
+            matches!(
+                p.kind(),
+                SyntaxKind::IfExpression | SyntaxKind::WhileExpression
+            )
+        })
+}
+
+/// What tells a control expression's parts apart, in either syntax: the
+/// parentheses around a condition and the `then` or `do` after it, and the
+/// parentheses or braces around a `for`'s enumerators and the `do` after
+/// them. `if (c) a` means `if c then a`, and `for (x <- xs) f(x)` means
+/// `for x <- xs do f(x)`.
+fn is_control_token(token: &SyntaxToken<'_>) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    match (parent.kind(), token.text()) {
+        (SyntaxKind::ParenthesizedExpression, "(" | ")") => is_condition_parens(&parent),
+        (SyntaxKind::IfExpression, "then") | (SyntaxKind::WhileExpression, "do") => {
+            token.field_name() == Some("condition")
+        }
+        (SyntaxKind::ForExpression, "(" | ")" | "{" | "}") => {
+            token.field_name() == Some("enumerators")
+        }
+        (SyntaxKind::ForExpression, "do") => true,
+        _ => false,
+    }
 }
 
 /// What Scala 3 drops from a vararg splice: the wildcard in `xs: _*`, and in
@@ -575,6 +620,20 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn control_syntax_means_the_same() {
+        let old = "if (c) a else b\nwhile (c) x\nfor (x <- xs) f(x)\nfor {\n  x <- xs\n} yield x\n";
+        let new =
+            "if c then a else b\nwhile c do x\nfor x <- xs do f(x)\nfor\n  x <- xs\nyield x\n";
+        assert_eq!(check_equivalent(old, new), Ok(()));
+        assert_eq!(check_equivalent(new, old), Ok(()));
+        assert_eq!(check_equivalent("if (c) then a\n", "if c then a\n"), Ok(()));
+        // Parentheses inside the condition still count.
+        differs("if ((a)) b\n", "if (a) b\n");
+        differs("if ((a)) b\n", "if a then b\n");
+        differs("if (a) + b then c\n", "if a + b then c\n");
     }
 
     #[test]
