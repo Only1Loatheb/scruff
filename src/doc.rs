@@ -783,7 +783,8 @@ mod tests {
     #[test]
     fn a_reluctant_group_lets_the_group_before_it_break() {
         let args = |a: &'static str, b: &'static str| {
-            (t("(") + (Doc::softline() + t(a) + t(",") + Doc::line() + t(b)).nest()
+            (t("(")
+                + (Doc::softline() + t(a) + t(",") + Doc::line() + t(b)).nest()
                 + Doc::softline()
                 + t(")"))
             .group()

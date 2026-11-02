@@ -1,5 +1,5 @@
 use crate::T;
-use crate::lossless_tree::{SyntaxKind, SyntaxToken};
+use crate::lossless_tree::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Whether two code tokens on the same line get a space between them, or
 /// `None` to keep the gap as written. Most pairs get a space; the exceptions
@@ -111,15 +111,29 @@ fn decide(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     true
 }
 
+/// The nodes `token` is the last token of, innermost first. Climbs only
+/// while it's the last, so it's quick deep in the tree.
+fn ended_by<'t>(token: &SyntaxToken<'t>) -> impl Iterator<Item = SyntaxNode<'t>> + use<'t> {
+    let first = token
+        .next_sibling_or_token()
+        .is_none()
+        .then(|| token.parent())
+        .flatten();
+    std::iter::successors(first, |node| {
+        node.next_sibling_or_token()
+            .is_none()
+            .then(|| node.parent())
+            .flatten()
+    })
+}
+
 /// Whether `a (` or `a [` is an application, written without a space:
 /// `f(x)`, `List[Int]`, `f(x)(y)`, `C[V](s)`.
 fn applies_to(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     // `@Inject() (b: C)`: the parameters after an annotation aren't its
     // arguments; without the space Scala would read them as such.
-    if a.parent_ancestors().any(|n| {
-        n.kind() == SyntaxKind::Annotation
-            && n.last_token() == Some(*a)
-            && !n.text_range().contains_range(b.text_range())
+    if ended_by(a).any(|n| {
+        n.kind() == SyntaxKind::Annotation && !n.text_range().contains_range(b.text_range())
     }) {
         return false;
     }
@@ -129,9 +143,7 @@ fn applies_to(a: &SyntaxToken<'_>, b: &SyntaxToken<'_>) -> bool {
     }
     // Constructor parameters after an access modifier, as in
     // `class A private[p] (a: Int)`.
-    if a.parent_ancestors()
-        .any(|n| n.kind() == SyntaxKind::AccessModifier && n.last_token() == Some(*a))
-    {
+    if ended_by(a).any(|n| n.kind() == SyntaxKind::AccessModifier) {
         return false;
     }
     // A keyword used as a name, such as `def extension(a: Int)`: tree-sitter

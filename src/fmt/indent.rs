@@ -233,8 +233,6 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
     // Outer containers first, so each one's opener line is placed before it.
     containers.sort_by_key(|c| (c.inner.start(), std::cmp::Reverse(c.inner.end())));
 
-    // The innermost container of each line: later, inner ones overwrite.
-    let mut owner = vec![0; lines.len()];
     let mut parent = vec![0; containers.len()];
     let mut stack: Vec<usize> = Vec::new();
     for (index, container) in containers.iter().enumerate() {
@@ -246,11 +244,33 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         }
         parent[index] = stack.last().copied().unwrap_or(0);
         stack.push(index);
-        let from = lines.partition_point(|l| l.first < container.inner.start());
-        let to = lines.partition_point(|l| l.first < container.inner.end());
-        for o in &mut owner[from..to] {
-            *o = index;
+    }
+    // The innermost container of each line: the last one, in order, that
+    // holds it. One sweep: containers are pushed as lines reach them, and
+    // the ones that ended are popped.
+    let mut owner = vec![0; lines.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut next = 0;
+    for (line, o) in lines.iter().zip(&mut owner) {
+        while containers
+            .get(next)
+            .is_some_and(|c| c.inner.start() <= line.first)
+        {
+            open.push(next);
+            next += 1;
         }
+        while open
+            .last()
+            .is_some_and(|&c| containers[c].inner.end() <= line.first)
+        {
+            open.pop();
+        }
+        *o = open.last().copied().unwrap_or(0);
+    }
+    // Each container's own lines.
+    let mut owned: Vec<Vec<usize>> = vec![Vec::new(); containers.len()];
+    for (line, &o) in owner.iter().enumerate() {
+        owned[o].push(line);
     }
 
     let mut shift = vec![0isize; containers.len()];
@@ -296,11 +316,11 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         let candidate = target as isize - indent as isize;
         // Every line of the container must stay at column 0 or deeper.
         // Comment lines don't count: they're placed with the statements.
-        let fits = owner
+        let fits = owned[index]
             .iter()
-            .zip(&lines)
-            .filter(|(o, l)| **o == index && !l.comment)
-            .all(|(_, l)| l.width >= floor && l.width as isize + candidate >= 0);
+            .map(|&line| &lines[line])
+            .filter(|l| !l.comment)
+            .all(|l| l.width >= floor && l.width as isize + candidate >= 0);
         // A line right after the container that was shallower than its
         // statements stays shallower: in `xs.map: x =>`, the body, then
         // `.filter(p)` between the two, a body moved to the `.filter` width
@@ -371,9 +391,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         let (first, end) = match frame {
             Frame::AfterLeading => (
                 node.text_range().start(),
-                node.tokens()
-                    .filter(SyntaxToken::owns_trivia)
-                    .last()
+                node.last_code_token()
                     .map_or(node.text_range().end(), |t| t.text_range().end()),
             ),
             Frame::At(token, end) => (token, end),
@@ -465,7 +483,7 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
             .find(SyntaxToken::owns_trivia)?;
         // From after the opener, which an `extension`'s range includes, to
         // its last token: the node can end at the next line's first token.
-        let last = node.tokens().filter(SyntaxToken::owns_trivia).last()?;
+        let last = node.last_code_token()?;
         let (frame, start) = match definition_start(node) {
             Some(start) => ((node.parent()?, Frame::AfterLeading), start),
             // An extension's range takes in its opener.

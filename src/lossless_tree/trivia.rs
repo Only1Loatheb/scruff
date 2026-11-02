@@ -198,6 +198,15 @@ impl<'t> SyntaxNode<'t> {
         self.tokens().next()
     }
 
+    /// The last token in this subtree that isn't trivia or missing. Steps
+    /// back from the last token, rather than through the whole subtree.
+    pub fn last_code_token(&self) -> Option<SyntaxToken<'t>> {
+        let start = self.text_range().start();
+        std::iter::successors(self.last_token(), SyntaxToken::prev_token)
+            .take_while(|t| t.text_range().start() >= start)
+            .find(SyntaxToken::owns_trivia)
+    }
+
     /// The last token in this subtree, which may be trivia.
     pub fn last_token(&self) -> Option<SyntaxToken<'t>> {
         let mut element = self.last_child_or_token()?;

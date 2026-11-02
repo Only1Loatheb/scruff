@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::T;
@@ -210,6 +212,13 @@ struct Formatter<'t> {
     /// Line breaks since the last code or comment.
     line_breaks: usize,
     style: Style,
+    /// Where each comment and each line break starts, in order, to ask
+    /// whether a range has one without scanning it.
+    comments: Vec<TextSize>,
+    breaks: Vec<TextSize>,
+    /// What [`Formatter::prints_on_one_line`] found for each node, since
+    /// rules ask it again for the nodes inside them.
+    one_line: RefCell<HashMap<SyntaxNode<'t>, bool>>,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -249,7 +258,25 @@ impl<'t> Formatter<'t> {
             at_file_start: true,
             line_breaks: 0,
             style,
+            comments: comment_starts(tree),
+            breaks: tree
+                .syntax()
+                .text()
+                .match_indices(['\n', '\r'])
+                .filter_map(|(i, _)| TextSize::try_from(i).ok())
+                .collect(),
+            one_line: RefCell::default(),
         }
+    }
+
+    /// Whether a comment starts in `range`.
+    fn has_comment(&self, range: TextRange) -> bool {
+        has_offset_in(&self.comments, range)
+    }
+
+    /// Whether a line break is in `range`.
+    fn has_line_break(&self, range: TextRange) -> bool {
+        has_offset_in(&self.breaks, range)
     }
 
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
@@ -793,19 +820,20 @@ impl<'t> Formatter<'t> {
     /// one-line code ask this rather than look at the source, so the first
     /// run decides as the second, on its output, would.
     fn prints_on_one_line(&self, element: &SyntaxElement<'t>) -> bool {
-        if !element.text().contains(['\n', '\r']) {
+        if !self.has_line_break(element.text_range()) {
             return true;
         }
         let NodeOrToken::Node(node) = element else {
             return false;
         };
-        if self.rules == Rules::Structural
-            && (self.list_parts(*node).is_some() || self.chain_parts(*node).is_some())
-        {
-            return true;
+        if let Some(&known) = self.one_line.borrow().get(node) {
+            return known;
         }
-        let children: Vec<_> = node.non_trivia_children().collect();
-        self.items_on_one_line(&children)
+        let one_line = self.rules == Rules::Structural
+            && (self.list_parts(*node).is_some() || self.chain_parts(*node).is_some())
+            || self.items_on_one_line(&node.non_trivia_children().collect::<Vec<_>>());
+        self.one_line.borrow_mut().insert(*node, one_line);
+        one_line
     }
 
     /// Whether the elements, in a row, print on one line: each does, and
@@ -843,14 +871,17 @@ impl<'t> Formatter<'t> {
         if !TextSize::try_from(line_start).is_ok_and(|start| self.free_at(start)) {
             return false;
         }
-        let tokens: Vec<_> = node.tokens().filter(|t| !t.is_trivia()).collect();
-        !tokens.iter().enumerate().any(|(i, t)| {
-            let leading = (i > 0).then(|| t.leading_trivia()).into_iter().flatten();
-            let trailing = (i + 1 < tokens.len()).then(|| t.trailing_trivia());
-            leading
-                .chain(trailing.into_iter().flatten())
-                .any(|t| t.is_comment())
-        })
+        // Comments between its first token and its last.
+        let element = NodeOrToken::Node(node);
+        match (first_code_token(&element), last_code_token(&element)) {
+            (Some(first), Some(last)) if first.text_range().end() < last.text_range().start() => {
+                !self.has_comment(TextRange::new(
+                    first.text_range().end(),
+                    last.text_range().start(),
+                ))
+            }
+            _ => true,
+        }
     }
 
     /// A lambda split at its arrow: what comes before it, the arrow, and the
@@ -1104,15 +1135,21 @@ impl<'t> Formatter<'t> {
                         self.line_breaks += 1;
                         // The code after the line breaks decides how many blank
                         // lines it may have before it. A comment between them
-                        // belongs to that code.
-                        let blank_lines = match next {
-                            Some(next) if !in_template(next) => {
-                                self.style.max_blank_lines_in_blocks
-                            }
-                            _ => self.style.max_blank_lines_in_templates,
+                        // belongs to that code. Asked only when it matters:
+                        // finding out climbs the tree.
+                        let style = self.style;
+                        let fewest = style
+                            .max_blank_lines_in_blocks
+                            .min(style.max_blank_lines_in_templates);
+                        let too_many = self.line_breaks > fewest + 1 && {
+                            let blank_lines = match next {
+                                Some(next) if !in_template(next) => style.max_blank_lines_in_blocks,
+                                _ => style.max_blank_lines_in_templates,
+                            };
+                            // The line break ending a line, then the blank lines.
+                            self.line_breaks > blank_lines + 1
                         };
-                        // The line break ending a line, then the blank lines.
-                        if self.at_file_start || self.line_breaks > blank_lines + 1 {
+                        if self.at_file_start || too_many {
                             continue;
                         }
                     }
@@ -1348,11 +1385,28 @@ fn first_code_token<'t>(element: &SyntaxElement<'t>) -> Option<SyntaxToken<'t>> 
 fn last_code_token<'t>(element: &SyntaxElement<'t>) -> Option<SyntaxToken<'t>> {
     match element {
         NodeOrToken::Token(token) => Some(*token).filter(|t| !t.is_trivia() && !t.is_missing()),
-        NodeOrToken::Node(node) => node
-            .tokens()
-            .filter(|t| !t.is_trivia() && !t.is_missing())
-            .last(),
+        NodeOrToken::Node(node) => node.last_code_token(),
     }
+}
+
+/// Where each comment in the tree starts, in order.
+fn comment_starts(tree: &Tree) -> Vec<TextSize> {
+    let mut starts: Vec<_> = tree
+        .syntax()
+        .tokens()
+        .flat_map(|t| t.leading_trivia().chain(t.trailing_trivia()))
+        .chain(tree.eof_trivia())
+        .filter(|t| t.is_comment())
+        .map(|t| t.text_range().start())
+        .collect();
+    starts.sort();
+    starts
+}
+
+/// Whether one of the sorted `offsets` is in `range`.
+fn has_offset_in(offsets: &[TextSize], range: TextRange) -> bool {
+    let i = offsets.partition_point(|&o| o < range.start());
+    offsets.get(i).is_some_and(|&o| o < range.end())
 }
 
 /// Whether the token starts its line.
@@ -1551,6 +1605,55 @@ mod tests {
             err.to_string()
                 .starts_with("not formatting code with syntax errors")
         );
+    }
+
+    /// Building the document takes time in proportion to the input, however
+    /// deep the nesting: eight times the depth takes about eight times as
+    /// long, not 64. The inputs have no indentation, so their size grows
+    /// with their depth alone.
+    #[test]
+    fn building_scales_linearly_with_nesting() {
+        let calls = |depth: usize| {
+            format!(
+                "val x =\n{}b{}\n",
+                "f(a,\n".repeat(depth),
+                ")".repeat(depth)
+            )
+        };
+        let blocks = |depth: usize| {
+            let opens: String = (0..depth).map(|i| format!("def f{i} = {{\n")).collect();
+            format!("object A {{\n{opens}1\n{}}}\n", "}\n".repeat(depth))
+        };
+        // The best of a few runs, to keep out noise.
+        let time = |source: &str| {
+            let tree = parse(source);
+            (0..3)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    drop(to_doc(&tree));
+                    start.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        // Formatting is recursive, so deep nesting needs a deep stack.
+        std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(move || {
+                let makers: [(&str, &dyn Fn(usize) -> String); 2] =
+                    [("calls", &calls), ("blocks", &blocks)];
+                for (name, make) in makers {
+                    let small = time(&make(500));
+                    let large = time(&make(4000));
+                    assert!(
+                        large < small * 20,
+                        "{name}: {small:?} at depth 500, {large:?} at 4000"
+                    );
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// Formats every error-free file in the corpus, checking that each
