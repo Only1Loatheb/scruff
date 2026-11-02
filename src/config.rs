@@ -25,14 +25,10 @@
 //! - `project.includeFilters` and `project.excludeFilters`, their older
 //!   form: regexes that must match somewhere in the path. Include filters
 //!   replace the default include paths unless those are set as well.
-//! - `runner.dialect` and `runner.dialectOverride`'s `allowStarWildcardImport`,
-//!   `allowAsForImportRename`, `allowQuestionMarkAsTypeWildcard`,
-//!   `allowPostfixStarVarargSplices`, `allowQuietSyntax` and
-//!   `allowSignificantIndentation`, also under `fileOverride`, whose
-//!   patterns are tried longest first, as in scalafmt. The dialect is
-//!   `scala3` when none is named. Fewer braces go with significant
-//!   indentation; `allowFewerBraces` isn't read. `using` clauses go with
-//!   the dialect's name, `scala3`; `allowGivenUsing` isn't read.
+//! - `runner.dialect`, also under `fileOverride`, whose patterns are
+//!   tried longest first, as in scalafmt. The dialect is `scala3` when
+//!   none is named. `runner.dialectOverride` isn't read: what scuff
+//!   rewrites goes with the dialect's name alone.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -142,54 +138,26 @@ impl Dialect {
     }
 }
 
-/// A dialect as a configuration gives it, before it's resolved: a name and
-/// flags that override the named dialect's.
+/// A dialect as a configuration gives it, before it's resolved: its name.
+/// scalafmt's `dialectOverride` flags aren't read; the name alone decides.
 #[derive(Clone, Debug, Default)]
 struct DialectSetting {
     name: Option<String>,
-    star_wildcard_import: Option<bool>,
-    as_for_import_rename: Option<bool>,
-    question_mark_type_wildcard: Option<bool>,
-    postfix_star_vararg_splices: Option<bool>,
-    quiet_syntax: Option<bool>,
-    significant_indentation: Option<bool>,
 }
 
 impl DialectSetting {
     /// The dialect: Scala 3 without a name.
     fn resolve(&self) -> Result<Dialect, String> {
         let name = self.name.as_deref().unwrap_or("scala3");
-        let mut dialect = Dialect::named(name).ok_or_else(|| {
+        Dialect::named(name).ok_or_else(|| {
             format!(
                 "unknown dialect {name:?}; the dialects are {}",
                 DIALECTS.join(", ")
             )
-        })?;
-        if let Some(allow) = self.star_wildcard_import {
-            dialect.star_wildcard_import = allow;
-        }
-        if let Some(allow) = self.as_for_import_rename {
-            dialect.as_for_import_rename = allow;
-        }
-        if let Some(allow) = self.question_mark_type_wildcard {
-            dialect.question_mark_type_wildcard = allow;
-        }
-        if let Some(allow) = self.postfix_star_vararg_splices {
-            dialect.postfix_star_vararg_splices = allow;
-        }
-        if let Some(allow) = self.quiet_syntax {
-            dialect.quiet_syntax = allow;
-        }
-        if let Some(allow) = self.significant_indentation {
-            dialect.significant_indentation = allow;
-        }
-        // A colon argument is indentation syntax.
-        dialect.fewer_braces &= dialect.significant_indentation;
-        Ok(dialect)
+        })
     }
 
-    /// This setting with what `runner` sets, an object holding `dialect`
-    /// and `dialectOverride`.
+    /// This setting with what `runner` sets, an object holding `dialect`.
     fn with_runner(&self, runner: &hocon::HoconValue) -> Result<DialectSetting, String> {
         let mut setting = self.clone();
         let Some(runner) = runner.as_object() else {
@@ -201,36 +169,6 @@ impl DialectSetting {
                     .ok_or("runner.dialect must be a dialect's name")?
                     .to_string(),
             );
-        }
-        if let Some(overrides) = runner.get("dialectOverride").and_then(|o| o.as_object()) {
-            let flag = |key: &str| -> Result<Option<bool>, String> {
-                overrides
-                    .get(key)
-                    .map(|v| {
-                        v.as_bool().ok_or_else(|| {
-                            format!("runner.dialectOverride.{key} must be true or false")
-                        })
-                    })
-                    .transpose()
-            };
-            if let Some(allow) = flag("allowStarWildcardImport")? {
-                setting.star_wildcard_import = Some(allow);
-            }
-            if let Some(allow) = flag("allowAsForImportRename")? {
-                setting.as_for_import_rename = Some(allow);
-            }
-            if let Some(allow) = flag("allowQuestionMarkAsTypeWildcard")? {
-                setting.question_mark_type_wildcard = Some(allow);
-            }
-            if let Some(allow) = flag("allowPostfixStarVarargSplices")? {
-                setting.postfix_star_vararg_splices = Some(allow);
-            }
-            if let Some(allow) = flag("allowQuietSyntax")? {
-                setting.quiet_syntax = Some(allow);
-            }
-            if let Some(allow) = flag("allowSignificantIndentation")? {
-                setting.significant_indentation = Some(allow);
-            }
         }
         Ok(setting)
     }
@@ -413,7 +351,6 @@ impl Config {
                 let setting = match &overrides[key.as_str()] {
                     value if value.as_str().is_some() => DialectSetting {
                         name: value.as_str().map(str::to_string),
-                        ..base.clone()
                     },
                     value => match value.as_object().and_then(|o| o.get("runner")) {
                         Some(runner) => base.with_runner(runner)?,
@@ -913,49 +850,49 @@ mod tests {
             config("").dialect_for(file("/p/A.scala").as_deref()),
             Dialect::SCALA3
         );
-        // `allowFewerBraces` isn't read; fewer braces go with significant
-        // indentation.
-        // `allowGivenUsing` isn't read; `using` goes with the dialect.
-        let using = |text: &str| config(text).dialect_for(None).given_using;
-        assert!(using("runner.dialectOverride.allowGivenUsing = false"));
-        assert!(!using(
-            "runner.dialect = scala213source3\nrunner.dialectOverride.allowGivenUsing = true"
-        ));
-        let fewer = |text: &str| config(text).dialect_for(None).fewer_braces;
-        assert!(fewer("runner.dialectOverride.allowFewerBraces = false"));
-        assert!(!fewer(
-            "runner.dialectOverride.allowSignificantIndentation = false"
-        ));
+        // `dialectOverride` isn't read; the dialect goes with its name.
+        for flag in [
+            "allowStarWildcardImport",
+            "allowAsForImportRename",
+            "allowQuestionMarkAsTypeWildcard",
+            "allowPostfixStarVarargSplices",
+            "allowQuietSyntax",
+            "allowSignificantIndentation",
+            "allowFewerBraces",
+            "allowGivenUsing",
+        ] {
+            let flipped = |name: &str, allow: bool| {
+                config(&format!(
+                    "runner.dialect = {name}\nrunner.dialectOverride.{flag} = {allow}"
+                ))
+                .dialect_for(None)
+            };
+            let named = |name| Dialect::named(name).unwrap();
+            assert_eq!(flipped("scala3", false), named("scala3"), "{flag}");
+            assert_eq!(flipped("scala213", true), named("scala213"), "{flag}");
+        }
         let c = config(
             r#"
             runner.dialect = scala3
-            runner.dialectOverride.allowAsForImportRename = false
             fileOverride {
               "glob:**/scala-2/**" { runner.dialect = scala213 }
               "glob:**/src/main/scala-2/**" = scala213source3
-              ".sbt" { runner.dialectOverride.allowStarWildcardImport = false }
-            ".sc" {
-              runner.dialectOverride.allowQuestionMarkAsTypeWildcard = false
-              runner.dialectOverride.allowPostfixStarVarargSplices = false
-            }
+              ".sbt" { runner.dialectOverride.allowQuietSyntax = false }
             }
             "#,
         );
         let dialect = |p: &str| c.dialect_for(file(p).as_deref());
+        let named = |name| Dialect::named(name).unwrap();
         let base = dialect("/p/src/A.scala");
-        assert!(base.star_wildcard_import && !base.as_for_import_rename);
-        // The longest matching pattern wins; a dialect's name alone keeps
-        // the overrides around it.
-        let longest = dialect("/p/src/main/scala-2/A.scala");
-        assert!(longest.star_wildcard_import && !longest.as_for_import_rename);
-        assert!(!dialect("/p/src/test/scala-2/A.scala").star_wildcard_import);
-        assert!(!dialect("/p/build.sbt").star_wildcard_import);
-        assert!(dialect("/p/build.sbt").question_mark_type_wildcard);
-        assert!(!dialect("/p/a.sc").question_mark_type_wildcard);
-        assert!(!dialect("/p/a.sc").postfix_star_vararg_splices);
-        assert!(dialect("/p/a.scala").postfix_star_vararg_splices);
-        assert!(dialect("/p/a.scala").quiet_syntax);
-        assert!(!dialect("/p/src/test/scala-2/A.scala").quiet_syntax);
+        assert_eq!(base, Dialect::SCALA3);
+        // The longest matching pattern wins.
+        assert_eq!(
+            dialect("/p/src/main/scala-2/A.scala"),
+            named("scala213source3")
+        );
+        assert_eq!(dialect("/p/src/test/scala-2/A.scala"), named("scala213"));
+        // An override without a dialect keeps the one around it.
+        assert_eq!(dialect("/p/build.sbt"), Dialect::SCALA3);
         // With no file, the dialect no pattern changes.
         assert_eq!(c.dialect_for(None), base);
     }
@@ -965,10 +902,6 @@ mod tests {
         let message = |text| Config::parse(Path::new("x"), text).unwrap_err().message;
         assert!(message("runner.dialect = scala4").contains("unknown dialect"));
         assert!(message("fileOverride { \".sbt\" = scala4 }").contains("unknown dialect"));
-        assert!(
-            message("runner.dialect = scala3\nrunner.dialectOverride.allowStarWildcardImport = 1")
-                .contains("true or false")
-        );
     }
 
     #[test]
@@ -1004,20 +937,19 @@ mod tests {
         if cats.join(SCALAFMT_FILE).is_file() {
             let config = Config::load(&cats.join(SCALAFMT_FILE)).unwrap();
             let dialect = |p: &str| config.dialect_for(Some(&cats.join(p)));
-            // `as` is turned off everywhere, `*` allowed everywhere, and
-            // Scala 3's control syntax only in `scala-3`.
+            // cats' `dialectOverride` flags aren't read.
+            let named = |name| Dialect::named(name).unwrap();
             let main = dialect("core/src/main/scala/cats/Functor.scala");
-            assert!(main.star_wildcard_import && !main.as_for_import_rename);
-            assert!(!main.quiet_syntax);
-            assert_eq!(dialect("core/src/main/scala-2.12/cats/A.scala"), main);
-            // cats turns significant indentation off.
-            let scala3 = Dialect {
-                quiet_syntax: true,
-                given_using: true,
-                ..main
-            };
-            assert_eq!(dialect("core/src/test/scala-3/cats/A.scala"), scala3);
-            assert_eq!(dialect("build.sbt"), main);
+            assert_eq!(main, named("scala213source3"));
+            assert_eq!(
+                dialect("core/src/main/scala-2.12/cats/A.scala"),
+                named("scala212source3")
+            );
+            assert_eq!(
+                dialect("core/src/test/scala-3/cats/A.scala"),
+                Dialect::SCALA3
+            );
+            assert_eq!(dialect("build.sbt"), named("sbt1"));
         }
         if found > 0 {
             let sbt = Config::load(&root.join("sbt").join(SCALAFMT_FILE)).unwrap();
