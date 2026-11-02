@@ -463,12 +463,15 @@ impl<'t> Formatter<'t> {
         self.skip_leading(&NodeOrToken::Token(*close));
         let close_text = self.token_without_trailing(*close);
         let close_trailing = self.trailing(*close);
-        Some(
-            open + (inner + Doc::softline() + close_text)
-                .group()
-                .from_line_indent()
-                + close_trailing,
-        )
+        let group = inner + Doc::softline() + close_text;
+        // Type arguments are a poor place to break: a list before them on
+        // the line breaks first, as the parameters before a result type
+        // `(F[A], F[B])`.
+        let group = match node.kind() {
+            SyntaxKind::TypeArguments => group.reluctant_group(),
+            _ => group.group(),
+        };
+        Some(open + group.from_line_indent() + close_trailing)
     }
 
     /// A block in braces holding one expression, such as `g { f(x) }` or

@@ -55,6 +55,12 @@ pub enum Doc<'a> {
     FromLineIndent(Box<Doc<'a>>),
     /// Printed flat if it fits, broken otherwise.
     Group(Box<Doc<'a>>),
+    /// A group that breaks only when it must: printed flat if it fits, as
+    /// any group, but the groups before it on its line don't count on it
+    /// breaking. When they measure the rest of their line, it counts as
+    /// flat, so they break first. For type arguments in a result type, so a
+    /// parameter list before them breaks instead.
+    ReluctantGroup(Box<Doc<'a>>),
     /// Prints `broken` if the enclosing group breaks, `flat` if not.
     IfBreak {
         broken: Box<Doc<'a>>,
@@ -171,6 +177,10 @@ impl<'a> Doc<'a> {
         Doc::Group(Box::new(self))
     }
 
+    pub fn reluctant_group(self) -> Doc<'a> {
+        Doc::ReluctantGroup(Box::new(self))
+    }
+
     pub fn if_break(broken: Doc<'a>, flat: Doc<'a>) -> Doc<'a> {
         Doc::IfBreak {
             broken: Box::new(broken),
@@ -212,7 +222,8 @@ impl<'a> Doc<'a> {
                 Doc::Nest(inner)
                 | Doc::Offset(_, inner)
                 | Doc::FromLineIndent(inner)
-                | Doc::Group(inner) => walk(inner, width),
+                | Doc::Group(inner)
+                | Doc::ReluctantGroup(inner) => walk(inner, width),
                 Doc::IfBreak { flat, .. } => walk(flat, width),
                 Doc::Align(parts) => parts
                     .iter()
@@ -254,7 +265,8 @@ impl<'a> Doc<'a> {
             Doc::Nest(inner)
             | Doc::Offset(_, inner)
             | Doc::FromLineIndent(inner)
-            | Doc::Group(inner) => inner.flat_width_counting(suffixes),
+            | Doc::Group(inner)
+            | Doc::ReluctantGroup(inner) => inner.flat_width_counting(suffixes),
             Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
             Doc::Align(parts) => parts
                 .iter()
@@ -453,7 +465,7 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                     ..part(inner)
                 });
             }
-            Doc::Group(inner) => {
+            Doc::Group(inner) | Doc::ReluctantGroup(inner) => {
                 let flat = Command {
                     mode: Mode::Flat,
                     ..part(inner)
@@ -658,7 +670,7 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
                 let line_indent = (line_indent as isize + columns).max(0) as usize;
                 walk(inner, line_indent, indent_width, column);
             }
-            Doc::FromLineIndent(inner) | Doc::Group(inner) => {
+            Doc::FromLineIndent(inner) | Doc::Group(inner) | Doc::ReluctantGroup(inner) => {
                 walk(inner, line_indent, indent_width, column);
             }
             Doc::IfBreak { broken, .. } => walk(broken, line_indent, indent_width, column),
@@ -719,6 +731,8 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             | Doc::Group(inner) => {
                 stack.push((mode, Item::Doc(inner)));
             }
+            // Never counted on to break.
+            Doc::ReluctantGroup(inner) => stack.push((Mode::Flat, Item::Doc(inner))),
             Doc::IfBreak { broken, flat } => {
                 let doc = if mode == Mode::Break { broken } else { flat };
                 stack.push((mode, Item::Doc(doc)));
@@ -764,6 +778,32 @@ mod tests {
         assert_eq!(at(80, &doc), "f(a, b)");
         assert_eq!(at(7, &doc), "f(a, b)", "exactly the width fits");
         assert_eq!(at(6, &doc), "f(\n  a,\n  b\n)");
+    }
+
+    #[test]
+    fn a_reluctant_group_lets_the_group_before_it_break() {
+        let args = |a: &'static str, b: &'static str| {
+            (t("(") + (Doc::softline() + t(a) + t(",") + Doc::line() + t(b)).nest()
+                + Doc::softline()
+                + t(")"))
+            .group()
+        };
+        let types = (t("[") + (Doc::softline() + t("B")).nest() + Doc::softline() + t("]"))
+            .reluctant_group();
+        let doc = t("f") + args("a", "b") + t(": F") + types.clone();
+        // Fits flat.
+        assert_eq!(at(80, &doc), "f(a, b): F[B]");
+        // `f(a, b): F[` fits in 12 but `f(a, b): F[B]` doesn't: the
+        // arguments break, not the type's brackets.
+        assert_eq!(at(12, &doc), "f(\n  a,\n  b\n): F[B]");
+        // With an ordinary group, the last one breaks.
+        let plain = t("f")
+            + args("a", "b")
+            + t(": F")
+            + (t("[") + (Doc::softline() + t("B")).nest() + Doc::softline() + t("]")).group();
+        assert_eq!(at(12, &plain), "f(a, b): F[\n  B\n]");
+        // Alone on its line, it breaks when it must.
+        assert_eq!(at(3, &(t("F") + types)), "F[\n  B\n]");
     }
 
     #[test]

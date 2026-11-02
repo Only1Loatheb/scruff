@@ -337,6 +337,13 @@ def sequential[Alpha, Beta, Gamma](
     a: Alpha
 ) = a
 
+<<< parameters break before the type arguments of a result type
+def f(alpha: Int)(beta: Int): (F[A], F[B]) = 1
+>>>
+def f(alpha: Int)(
+    beta: Int
+): (F[A], F[B]) = 1
+
 <<< type arguments that don't fit
 val m: Map[ModuleIdentifier, VersionNumber] = x
 >>>
