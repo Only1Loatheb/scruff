@@ -34,7 +34,10 @@
 //! In a pattern, as `case x: (A & B)`, the type needs parentheses, which
 //! `A with B` may go without: `case x: A & B` is the pattern `x: A` and `B`.
 //! Commas between the parents a class extends mean the same as `with`:
-//! `extends A, B` as `extends A with B`.
+//! `extends A, B` as `extends A with B`. And parentheses around a boolean
+//! chain mean nothing, as `(a && b)` as `a && b`: the tree holds the
+//! grouping, so a change of precedence is still a different shape. In
+//! Scala 2 they let a broken chain start its lines with the operators.
 
 use std::fmt;
 
@@ -187,6 +190,30 @@ fn is_pattern_type_parens(node: &SyntaxNode<'_>) -> bool {
     )
 }
 
+/// Parentheses around a boolean chain, as in `(a && b)`, which mean
+/// nothing: the chain is one node either way.
+fn is_chain_parens(node: &SyntaxNode<'_>) -> bool {
+    if node.kind() != SyntaxKind::ParenthesizedExpression {
+        return false;
+    }
+    let mut children = node.non_trivia_children();
+    matches!(
+        (children.next(), children.next(), children.next(), children.next()),
+        (
+            Some(NodeOrToken::Token(open)),
+            Some(NodeOrToken::Node(inner)),
+            Some(NodeOrToken::Token(close)),
+            None,
+        ) if open.text() == "(" && close.text() == ")"
+            && inner.kind() == SyntaxKind::InfixExpression
+            && inner
+                .non_trivia_children()
+                .find(|c| c.field_name() == Some("operator"))
+                .and_then(|o| o.as_token().map(|t| matches!(t.text(), "&&" | "||")))
+                .unwrap_or(false)
+    )
+}
+
 /// The left part of an intersection type that is itself one, as `A & B` in
 /// `A & B & C`, which counts as part of the outer one: `A with B with C` is
 /// one compound type.
@@ -332,6 +359,9 @@ fn field(element: SyntaxElement<'_>) -> Option<&'static str> {
             _ if is_colon_lambda(&parent) => element.field_name(),
             _ => parent.field_name(),
         },
+        // Parentheses around a chain may be inside another node that's
+        // skipped, as a block around one expression.
+        Some(parent) if is_chain_parens(&parent) => field(NodeOrToken::Node(parent)),
         Some(parent)
             if is_condition_parens(&parent)
                 || is_transparent_block(&parent)
@@ -412,6 +442,7 @@ fn code_steps(root: SyntaxNode<'_>) -> impl Iterator<Item = Step<'_>> {
                 || is_lone_catch_case(&node)
                 || is_nested_and_type(&node)
                 || is_pattern_type_parens(&node)
+                || is_chain_parens(&node)
                 || is_optional_end_marker(&node) =>
         {
             None
@@ -433,7 +464,9 @@ fn may_come_or_go(token: &SyntaxToken<'_>) -> bool {
         || is_lone_rename_brace(token)
         || is_old_splice_token(token)
         || (matches!(token.text(), "(" | ")")
-            && token.parent().is_some_and(|p| is_pattern_type_parens(&p)))
+            && token
+                .parent()
+                .is_some_and(|p| is_pattern_type_parens(&p) || is_chain_parens(&p)))
         || is_control_token(token)
         || is_optional_brace(token)
         || (token.text() == ":"
@@ -963,6 +996,23 @@ mod tests {
         differs("class C extends A with B\n", "class C extends A, D\n");
         differs("val a = new A with B\n", "val a = new A, B\n");
         differs("class C extends A[X with Y]\n", "class C extends A[X, Y]\n");
+    }
+
+    #[test]
+    fn parentheses_around_a_boolean_chain_mean_nothing() {
+        assert_eq!(
+            check_equivalent("val x = a && b\n", "val x = (a\n  && b)\n"),
+            Ok(())
+        );
+        assert_eq!(
+            check_equivalent("if (a || b) c\n", "if (a\n  || b) c\n"),
+            Ok(())
+        );
+        // Still a different grouping.
+        assert!(check_equivalent("val x = (a || b) && c\n", "val x = a || b && c\n").is_err());
+        assert!(check_equivalent("val x = !(a && b)\n", "val x = !a && b\n").is_err());
+        // Only around a chain of `&&` or `||`.
+        assert!(check_equivalent("val x = (a + b)\n", "val x = a + b\n").is_err());
     }
 
     #[test]

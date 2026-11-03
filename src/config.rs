@@ -95,6 +95,11 @@ pub struct Dialect {
     /// Commas between the parents a class extends: `extends A, B` for
     /// `extends A with B`. Only Scala 3's.
     pub comma_separated_extends: bool,
+    /// A line may start with an infix operator, continuing the line
+    /// before, as in `a` and then `&& b` on the next line. Only Scala 3's.
+    /// Without it, a boolean chain broken before its operators is wrapped
+    /// in parentheses, inside which line breaks don't end a statement.
+    pub leading_infix_operators: bool,
 }
 
 /// The dialects scuff knows, by scalafmt's names.
@@ -119,6 +124,7 @@ impl Dialect {
         given_using: true,
         and_types: true,
         comma_separated_extends: true,
+        leading_infix_operators: true,
     };
 
     /// The dialect scalafmt calls `name`, ignoring case: `scala3`,
@@ -144,6 +150,7 @@ impl Dialect {
             given_using: scala3,
             and_types: scala3,
             comma_separated_extends: scala3,
+            leading_infix_operators: scala3,
         })
     }
 }
@@ -825,6 +832,7 @@ mod tests {
             given_using: true,
             and_types: true,
             comma_separated_extends: true,
+            leading_infix_operators: true,
         };
         let old = Dialect {
             star_wildcard_import: false,
@@ -837,6 +845,7 @@ mod tests {
             given_using: false,
             and_types: false,
             comma_separated_extends: false,
+            leading_infix_operators: false,
         };
         let source3 = Dialect {
             quiet_syntax: false,
@@ -845,6 +854,7 @@ mod tests {
             given_using: false,
             and_types: false,
             comma_separated_extends: false,
+            leading_infix_operators: false,
             ..new
         };
         assert_eq!(Dialect::named("scala3"), Some(new));

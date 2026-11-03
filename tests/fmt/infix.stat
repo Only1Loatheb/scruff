@@ -1,6 +1,8 @@
-# Infix chains: on one line if they fit, otherwise broken after each
-# operator, with the operands after the first indented 2 spaces from the
-# line the chain starts on, as in sbt's code.
+# Infix chains: on one line if they fit, otherwise broken before each
+# operator, with the operators starting the lines after the first, indented
+# 2 spaces from the line the chain starts on. In Scala 2, where a line can't
+# start with an operator, the broken chain is wrapped in parentheses unless
+# it's inside some already, as an `if` condition or an argument is.
 maxColumn = 40
 
 <<< a chain that fits stays on one line
@@ -8,25 +10,25 @@ val ok = alpha && beta && gamma
 >>>
 val ok = alpha && beta && gamma
 
-<<< a chain that doesn't fit breaks after each operator
+<<< a chain that doesn't fit breaks before each operator
 val ok = alpha && beta && gamma && delta1
 >>>
-val ok = alpha &&
-  beta &&
-  gamma &&
-  delta1
+val ok = alpha
+  && beta
+  && gamma
+  && delta1
 
 <<< only the loosest operators break; tighter ones stay together
 val ok = alpha == beta || gamma == delta1
 >>>
-val ok = alpha == beta ||
-  gamma == delta1
+val ok = alpha == beta
+  || gamma == delta1
 
 <<< && inside || stays together when it fits on its line
 val ok = alpha && beta || gamma && delta && eps
 >>>
-val ok = alpha && beta ||
-  gamma && delta && eps
+val ok = alpha && beta
+  || gamma && delta && eps
 
 <<< other operators don't break, as in scalafmt with sbt's settings
 val xs = alpha :: beta :: gamma :: delta :: Nil
@@ -40,10 +42,10 @@ val s = "a" + alpha + "b" + beta + "c" + gamma1
 <<< a boolean chain inside another expression breaks on its own
 val n = count + (alpha && beta && gamma && delta)
 >>>
-val n = count + (alpha &&
-  beta &&
-  gamma &&
-  delta)
+val n = count + (alpha
+  && beta
+  && gamma
+  && delta)
 
 <<< a trailing comment doesn't count toward the width
 val ok = alpha && beta // a long comment that goes on
@@ -70,10 +72,107 @@ object A {
 }
 >>>
 object A {
-  def ok = alpha &&
-    beta &&
-    gamma &&
-    delta
+  def ok = (alpha
+    && beta
+    && gamma
+    && delta)
+}
+
+<<< Scala 2: a chain that fits gets no parentheses
+dialect = scala213
+===
+val ok = alpha && beta && gamma
+>>>
+val ok = alpha && beta && gamma
+
+<<< Scala 2: the `)` goes before a trailing comment
+dialect = scala213
+===
+val ok = alpha && beta && gamma && delta1 // why
+>>>
+val ok = (alpha
+  && beta
+  && gamma
+  && delta1) // why
+
+<<< Scala 2: an `if` condition has its parentheses already
+dialect = scala213
+===
+if (alpha && beta && gamma && delta && eps1) f()
+>>>
+if (alpha
+  && beta
+  && gamma
+  && delta
+  && eps1) f()
+
+<<< Scala 2: so does a chain inside an argument
+dialect = scala213
+===
+foo(x, alpha && beta && gamma && delta && epsilon)
+>>>
+foo(
+  x,
+  alpha
+    && beta
+    && gamma
+    && delta
+    && epsilon,
+)
+
+<<< Scala 2: and one inside a lambda in parentheses
+dialect = scala213
+===
+xs.filter(x => alpha && beta && gamma && delta && eps)
+>>>
+xs.filter(x =>
+  alpha && beta && gamma && delta && eps
+)
+
+<<< Scala 2: a lambda in braces needs them again
+dialect = scala213
+===
+xs.filter { x => alpha && beta && gamma && delta && epsilon }
+>>>
+xs.filter { x =>
+  (alpha
+    && beta
+    && gamma
+    && delta
+    && epsilon)
+}
+
+<<< Scala 2: parentheses around the chain stay
+dialect = scala213
+===
+val ok = (alpha && beta && gamma && delta1)
+>>>
+val ok = (alpha
+  && beta
+  && gamma
+  && delta1)
+
+<<< Scala 2: an `if` condition in Scala 3's syntax, left as written, gets none
+dialect = scala213
+===
+object A {
+  def f =
+    x match
+      case _ =>
+        if alpha || (beta && gamma && delta)
+        then a
+        else b
+}
+>>>
+object A {
+  def f =
+    x match {
+      case _ =>
+        if alpha
+          || (beta && gamma && delta)
+        then a
+        else b
+    }
 }
 
 <<< a chain written over several lines keeps its line breaks

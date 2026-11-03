@@ -174,17 +174,17 @@ def f =
     four
 >>>
 def f =
-  if alpha &&
-    beta &&
-    gamma &&
-    delta &&
-    epsilon &&
-    zeta &&
-    eta &&
-    theta &&
-    iota &&
-    kappa &&
-    lambda then
+  if alpha
+    && beta
+    && gamma
+    && delta
+    && epsilon
+    && zeta
+    && eta
+    && theta
+    && iota
+    && kappa
+    && lambda then
     one()
     two
   else

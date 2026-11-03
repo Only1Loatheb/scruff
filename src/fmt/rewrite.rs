@@ -1423,6 +1423,7 @@ mod tests {
         given_using: false,
         and_types: false,
         comma_separated_extends: false,
+        leading_infix_operators: false,
     };
 
     /// The rewritten text, if anything changed.
