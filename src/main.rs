@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
@@ -62,8 +63,25 @@ enum Command {
     },
 }
 
+/// Formatting is recursive, so deep nesting needs a deep stack: about 1,000
+/// levels overflow the usual 2 MB. Untouched stack is only address space.
+const STACK_SIZE: usize = 256 << 20;
+
+/// How long a file may take to format before it's left as written. Only
+/// pathological code comes near it, such as calls nested thousands deep.
+const TIME_LIMIT: Duration = Duration::from_secs(3);
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || run(cli))
+        .expect("can start a thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Format { files, check } => format(files, check),
         Command::Parse { file, quiet } => parse(file, quiet),
@@ -288,7 +306,13 @@ fn format_file(file: &Path, config: Option<&Config>, check: bool) -> Outcome {
         Ok(source) => source,
         Err(err) => return Outcome::error(format!("error: can't read {name}: {err}")),
     };
-    match fmt::format(&source, &options(config, Some(file))) {
+    let Some(result) = format_in_time(&source, options(config, Some(file))) else {
+        return Outcome {
+            code: 2,
+            messages: timed_out(&name),
+        };
+    };
+    match result {
         Ok(formatted) if formatted == source => Outcome::default(),
         Ok(_) if check => Outcome {
             code: 1,
@@ -321,7 +345,11 @@ fn format_stdin(check: bool) -> ExitCode {
         Ok(input) => input,
         Err(code) => return code,
     };
-    match fmt::format(&source, &options(config.as_ref(), None)) {
+    let Some(result) = format_in_time(&source, options(config.as_ref(), None)) else {
+        eprint!("{}", timed_out(&name));
+        return ExitCode::from(2);
+    };
+    match result {
         Ok(formatted) if check => {
             if formatted == source {
                 ExitCode::SUCCESS
@@ -339,6 +367,38 @@ fn format_stdin(check: bool) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `f`'s result, run on a thread of its own with a deep stack, or `None` if
+/// it takes longer than `limit`. A thread can't be stopped, so then it runs
+/// on unwatched until the process exits.
+fn within<T: Send + 'static>(limit: Duration, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (send, receive) = mpsc::channel();
+    std::thread::Builder::new()
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            // The receiver is gone if it gave up waiting.
+            let _ = send.send(f());
+        })
+        .expect("can start a thread");
+    receive.recv_timeout(limit).ok()
+}
+
+/// `fmt::format`, given [`TIME_LIMIT`]: `None` if it takes longer.
+fn format_in_time(
+    source: &str,
+    options: fmt::FormatOptions,
+) -> Option<Result<String, fmt::FormatError>> {
+    let source = source.to_string();
+    within(TIME_LIMIT, move || fmt::format(&source, &options))
+}
+
+/// What to print when formatting `name` takes too long.
+fn timed_out(name: &str) -> String {
+    format!(
+        "{name}: error: not formatted: took longer than {} seconds\n",
+        TIME_LIMIT.as_secs()
+    )
 }
 
 /// What to print when `name` can't be formatted.
@@ -428,4 +488,33 @@ fn read_source(file: Option<PathBuf>) -> Result<(String, String), ExitCode> {
         eprintln!("error: can't read {name}: {err}");
         ExitCode::from(2)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn within_gives_up_after_its_limit() {
+        assert_eq!(within(Duration::from_secs(10), || 1), Some(1));
+        let slow = || std::thread::sleep(Duration::from_secs(10));
+        assert_eq!(within(Duration::from_millis(10), slow), None);
+    }
+
+    #[test]
+    fn within_has_a_deep_stack() {
+        fn depth(n: u64) -> u64 {
+            // Enough in each frame that a 2 MB stack overflows.
+            let frame = std::hint::black_box([n; 64]);
+            if n == 0 {
+                0
+            } else {
+                1 + depth(n - 1) + frame[0] - n
+            }
+        }
+        assert_eq!(
+            within(Duration::from_secs(10), || depth(20_000)),
+            Some(20_000)
+        );
+    }
 }
