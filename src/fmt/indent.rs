@@ -29,6 +29,22 @@ use crate::lossless_tree::{
     VerbatimReason,
 };
 
+/// What the formatter lays out itself, so the layout follows it.
+#[derive(Default, Debug)]
+pub(super) struct Relaid {
+    /// The `(` and `)` of lists whose line breaks the formatter decides:
+    /// what follows the `)` ends up on a line indented as the `(`'s line,
+    /// whether the list is joined or broken.
+    pub(super) lists: Vec<(TextSize, TextSize)>,
+    /// Where lines start that the formatter joins to the line before or
+    /// breaks itself, as a boolean chain's: they aren't laid out, and what
+    /// they hold is on the line before.
+    pub(super) joined: Vec<TextSize>,
+    /// Whether a boolean chain the formatter lays out is written over
+    /// several lines.
+    pub(super) broken_chains: bool,
+}
+
 /// How many spaces each container's statements are indented past its
 /// opener's line.
 const STEP: usize = 2;
@@ -73,10 +89,8 @@ pub(super) struct Nested {
 }
 
 impl Layout {
-    /// `relaid` lists the `(` and `)` of lists whose line breaks the
-    /// formatter decides: what follows the `)` ends up on a line indented
-    /// as the `(`'s line, whether the list is joined or broken.
-    pub(super) fn new(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Layout {
+    /// `relaid` is what the formatter lays out itself.
+    pub(super) fn new(tree: &Tree, relaid: &Relaid) -> Layout {
         compute(tree, relaid).unwrap_or_default()
     }
 
@@ -160,7 +174,7 @@ struct Line {
     comment: bool,
 }
 
-fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
+fn compute(tree: &Tree, relaid: &Relaid) -> Option<Layout> {
     let text = tree.syntax().text();
     let copied_for_layout = tree.verbatim_ranges().iter().any(|v| {
         matches!(
@@ -175,6 +189,9 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
     }
 
     let mut lines = Vec::new();
+    // Every line's first character, for the lines that print on the line
+    // before them unless a rule breaks them to fit.
+    let mut firsts = Vec::new();
     let mut start = 0;
     for line in text.split_inclusive('\n') {
         let content = line.trim_start_matches([' ', '\t']);
@@ -182,6 +199,11 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         let line_start = TextSize::try_from(start).ok()?;
         start += line.len();
         if content.trim().is_empty() {
+            continue;
+        }
+        let first = line_start + TextSize::try_from(indent.len()).ok()?;
+        firsts.push(first);
+        if relaid.joined.binary_search(&first).is_ok() {
             continue;
         }
         // A line inside a multi-line string or comment is content.
@@ -195,7 +217,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
             return None;
         }
         lines.push(Line {
-            first: line_start + TextSize::try_from(indent.len()).ok()?,
+            first,
             width: indent.len(),
             comment: content.starts_with("//") || content.starts_with("/*"),
         });
@@ -203,7 +225,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
     let line_of = |offset: TextSize| lines.partition_point(|l| l.first <= offset).checked_sub(1);
     // The line of a relaid list's `)` stands for the line of its `(`.
     let mut moved = HashMap::new();
-    for &(open, close) in relaid {
+    for &(open, close) in &relaid.lists {
         if let (Some(open), Some(close)) = (line_of(open), line_of(close))
             && open != close
         {
@@ -217,6 +239,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         line
     };
 
+    let continued = continued_lines(&firsts, relaid);
     let mut containers = vec![Container {
         node: tree.syntax(),
         frame: None,
@@ -226,7 +249,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
         cases: false,
     }];
     for node in tree.syntax().descendants() {
-        if let Some(container) = container(node) {
+        if let Some(container) = container(node, &continued) {
             containers.push(container);
         }
     }
@@ -463,7 +486,7 @@ fn compute(tree: &Tree, relaid: &[(TextSize, TextSize)]) -> Option<Layout> {
 }
 
 /// The container a node makes, if any.
-fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
+fn container<'t>(node: SyntaxNode<'t>, continued: &[TextSize]) -> Option<Container<'t>> {
     // A lambda body in braces is no region, since its indentation doesn't
     // matter, but its lines are indented from its arrow all the same.
     let lambda_body = node.kind() == SyntaxKind::IndentedBlock
@@ -490,7 +513,7 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
             None if node.text_range().start() <= opener.text_range().start() => {
                 ((node, Frame::AfterLeading), opener)
             }
-            None => match owner_frame(node, opener) {
+            None => match owner_frame(node, opener, continued) {
                 Some(frame) => (frame, opener),
                 None => {
                     let (owner, from) = opener_frame(node, opener)?;
@@ -539,7 +562,7 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
                     Frame::At(open.text_range().start(), close.text_range().end()),
                 )
             };
-            (owner_frame(node, *open).unwrap_or(own), *open)
+            (owner_frame(node, *open, continued).unwrap_or(own), *open)
         }
     };
     Some(Container {
@@ -552,15 +575,42 @@ fn container(node: SyntaxNode<'_>) -> Option<Container<'_>> {
     })
 }
 
+/// The lines that print on the line before them unless a rule breaks them
+/// to fit, by their first character, in order: the lines a boolean chain
+/// joins, and the lines inside a relaid list, through its `)`.
+fn continued_lines(firsts: &[TextSize], relaid: &Relaid) -> Vec<TextSize> {
+    // How many lists each line is inside, from where they open and close.
+    let mut edges: Vec<(TextSize, isize)> = Vec::new();
+    for &(open, close) in &relaid.lists {
+        edges.push((open + TextSize::from(1), 1));
+        edges.push((close + TextSize::from(1), -1));
+    }
+    edges.sort();
+    let mut continued = Vec::new();
+    let (mut depth, mut next) = (0, 0);
+    for &first in firsts {
+        while edges.get(next).is_some_and(|&(at, _)| at <= first) {
+            depth += edges[next].1;
+            next += 1;
+        }
+        if depth > 0 || relaid.joined.binary_search(&first).is_ok() {
+            continued.push(first);
+        }
+    }
+    continued
+}
+
 /// For a region or a block in braces that isn't a definition's body, a
 /// frame from the start of what it belongs to, such as an `if`, a lambda
 /// or a call, if that's on the opener's line: a rule that breaks the line
 /// before the opener, as in a long condition, doesn't move the body. `None`
 /// if it starts on an earlier line, as for an `else` on a line of its own,
-/// so the frame starts at the opener.
+/// so the frame starts at the opener. Lines that print on the line before
+/// them unless a rule breaks them to fit, `continued`, count as on it.
 fn owner_frame<'t>(
     node: SyntaxNode<'t>,
     opener: SyntaxToken<'t>,
+    continued: &[TextSize],
 ) -> Option<(SyntaxNode<'t>, Frame)> {
     let owner = std::iter::successors(node.parent(), SyntaxNode::parent).find(|n| {
         n.tokens()
@@ -569,9 +619,16 @@ fn owner_frame<'t>(
     })?;
     let start = owner.tokens().find(SyntaxToken::owns_trivia)?;
     let base = owner.text_range().start();
-    let between = &owner.text()[usize::from(start.text_range().start() - base)
-        ..usize::from(opener.text_range().start() - base)];
-    (!between.contains('\n')).then_some((owner, Frame::AfterLeading))
+    let from = usize::from(start.text_range().start() - base);
+    let between = &owner.text()[from..usize::from(opener.text_range().start() - base)];
+    // Each line break, unless the line after it is continued.
+    let separate = between.match_indices('\n').any(|(i, _)| {
+        let rest = &between[i + 1..];
+        let indent = rest.len() - rest.trim_start_matches([' ', '\t', '\r']).len();
+        TextSize::try_from(from + i + 1 + indent)
+            .is_ok_and(|at| continued.binary_search(&(base + at)).is_err())
+    });
+    (!separate).then_some((owner, Frame::AfterLeading))
 }
 
 /// For a region framed from its opener, the node around both and its child
@@ -657,7 +714,7 @@ mod tests {
     /// The source with each line moved to its new indentation.
     fn reindented(source: &str) -> String {
         let tree = parse(source);
-        let reindent = Layout::new(&tree, &[]);
+        let reindent = Layout::new(&tree, &Relaid::default());
         let mut out = String::new();
         let mut start = 0;
         for line in source.split_inclusive('\n') {
@@ -702,7 +759,7 @@ mod tests {
     #[test]
     fn already_formatted_code_stays() {
         let source = "object A {\n  def f = {\n    g(\n      a\n    )\n  }\n}\n";
-        assert_eq!(Layout::new(&parse(source), &[]).len(), 0);
+        assert_eq!(Layout::new(&parse(source), &Relaid::default()).len(), 0);
     }
 
     #[test]
@@ -716,7 +773,7 @@ mod tests {
     #[test]
     fn an_end_marker_read_as_a_statement_stays() {
         let source = "trait A:\n//\nend A\n";
-        assert_eq!(Layout::new(&parse(source), &[]).len(), 0);
+        assert_eq!(Layout::new(&parse(source), &Relaid::default()).len(), 0);
     }
 
     #[test]

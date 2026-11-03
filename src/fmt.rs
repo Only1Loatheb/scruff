@@ -162,37 +162,52 @@ fn format_once(
         indent: "  ".to_string(),
         line_ending: "\n".to_string(),
     };
-    let relaid = relaid_lists(tree, rules, style);
-    let mut layout = Some(indent::Layout::new(tree, &relaid));
-    let reindented = layout.as_ref().is_some_and(|l| !l.is_empty());
     let end_markers = options.dialect.significant_indentation;
     let leading_infix = options.dialect.leading_infix_operators;
-    // What to try, in order, until the result means the same. Where
-    // tree-sitter-scala reads the layout differently from scalac, moving
-    // lines can change the tree, and so can an end marker it attaches to
-    // something else. Then leave out end markers, or keep the indentation
-    // as written, keeping the rest of the formatting.
-    let tries = [(true, true), (true, false), (false, true), (false, false)]
-        .into_iter()
-        .filter(|&(reindent, markers)| (reindent || reindented) && (!markers || end_markers));
     let mut difference = None;
-    for (reindent, markers) in tries {
-        let layout = if reindent {
-            layout
-                .take()
-                .unwrap_or_else(|| indent::Layout::new(tree, &relaid))
-        } else {
-            indent::Layout::default()
-        };
-        let doc = build_doc(tree, rules, style, layout, markers, leading_infix);
-        let formatted = print(&doc, &print_options);
-        if formatted == tree.syntax().text() {
-            return Ok((formatted, rewritten));
+    // Boolean chains written over several lines are laid out first, and
+    // then, if nothing else works, kept as written: tree-sitter-scala's
+    // reading of the lines after one can depend on its line breaks.
+    let mut any_broken_chains = false;
+    for broken_chains in [true, false] {
+        if !broken_chains && !any_broken_chains {
+            break;
         }
-        let formatted_tree = parse(&formatted);
-        match check_equivalent_trees(original, &formatted_tree) {
-            Ok(()) => return Ok((formatted, Some(formatted_tree))),
-            Err(d) => difference = Some(d),
+        let relaid = relaid(tree, rules, style, broken_chains);
+        any_broken_chains |= relaid.broken_chains;
+        let mut layout = Some(indent::Layout::new(tree, &relaid));
+        let reindented = layout.as_ref().is_some_and(|l| !l.is_empty());
+        // What to try, in order, until the result means the same. Where
+        // tree-sitter-scala reads the layout differently from scalac,
+        // moving lines can change the tree, and so can an end marker it
+        // attaches to something else. Then leave out end markers, or keep
+        // the indentation as written, keeping the rest of the formatting.
+        let tries = [(true, true), (true, false), (false, true), (false, false)]
+            .into_iter()
+            .filter(|&(reindent, markers)| (reindent || reindented) && (!markers || end_markers));
+        for (reindent, markers) in tries {
+            let layout = if reindent {
+                layout
+                    .take()
+                    .unwrap_or_else(|| indent::Layout::new(tree, &relaid))
+            } else {
+                indent::Layout::default()
+            };
+            let options = BuildOptions {
+                end_markers: markers,
+                leading_infix,
+                broken_chains,
+            };
+            let doc = build_doc(tree, rules, style, layout, options);
+            let formatted = print(&doc, &print_options);
+            if formatted == tree.syntax().text() {
+                return Ok((formatted, rewritten));
+            }
+            let formatted_tree = parse(&formatted);
+            match check_equivalent_trees(original, &formatted_tree) {
+                Ok(()) => return Ok((formatted, Some(formatted_tree))),
+                Err(d) => difference = Some(d),
+            }
         }
     }
     let difference = difference.expect("one try at least");
@@ -201,35 +216,81 @@ fn format_once(
 
 /// The document for a parsed file, before printing.
 pub fn to_doc<'t>(tree: &'t Tree) -> Doc<'t> {
-    let relaid = relaid_lists(tree, Rules::Structural, STYLE);
+    let relaid = relaid(tree, Rules::Structural, STYLE, true);
     build_doc(
         tree,
         Rules::Structural,
         STYLE,
         indent::Layout::new(tree, &relaid),
-        true,
-        true,
+        BuildOptions::default(),
     )
 }
 
-/// Where the lists are, as `(` and `)` offsets, that the list rule lays
-/// out itself, for [`indent::Layout`]: what follows the `)` goes on the
-/// line of the `(`, whether the list is joined or broken.
-fn relaid_lists(tree: &Tree, rules: Rules, style: Style) -> Vec<(TextSize, TextSize)> {
+/// What the formatter lays out itself, for [`indent::Layout`]: the lists
+/// the list rule lays out, as `(` and `)` offsets, and the lines boolean
+/// chains join or break, with their parentheses' where those are the
+/// chain's own.
+fn relaid(tree: &Tree, rules: Rules, style: Style, broken_chains: bool) -> indent::Relaid {
+    let mut relaid = indent::Relaid::default();
     if rules != Rules::Structural {
-        return Vec::new();
+        return relaid;
     }
-    let formatter = Formatter::new(tree, rules, style, indent::Layout::default(), false, true);
-    tree.syntax()
-        .descendants()
-        .filter_map(|node| formatter.list_parts(node))
-        .map(|parts| {
-            (
+    let options = BuildOptions {
+        broken_chains,
+        ..BuildOptions::default()
+    };
+    let formatter = Formatter::new(tree, rules, style, indent::Layout::default(), options);
+    let line_first =
+        |token: SyntaxToken<'_>| token.is_first_on_line().then(|| token.text_range().start());
+    for node in tree.syntax().descendants() {
+        if let Some(parts) = formatter.list_parts(node) {
+            relaid.lists.push((
                 parts.open.text_range().start(),
                 parts.close.text_range().start(),
-            )
-        })
-        .collect()
+            ));
+        }
+        if let Some(parts) = formatter.infix_parts(node) {
+            relaid.broken_chains |= formatter.has_line_break(node.text_range());
+            for (op, operand) in parts.operators.iter().zip(&parts.operands[1..]) {
+                relaid.joined.extend(line_first(*op));
+                relaid
+                    .joined
+                    .extend(first_code_token(operand).and_then(line_first));
+            }
+        }
+        if let Some((chain, close)) = formatter.chain_parens_parts(node) {
+            relaid
+                .joined
+                .extend(first_code_token(&NodeOrToken::Node(chain)).and_then(line_first));
+            relaid.joined.extend(line_first(close));
+        }
+    }
+    relaid.joined.sort();
+    relaid.joined.dedup();
+    relaid
+}
+
+/// What a [`Formatter`] does beyond its rules.
+#[derive(Clone, Copy)]
+struct BuildOptions {
+    /// Whether long statements get an end marker: only where the dialect
+    /// has significant indentation.
+    end_markers: bool,
+    /// Whether a line may start with an infix operator.
+    leading_infix: bool,
+    /// Whether boolean chains written over several lines are laid out, or
+    /// kept as written.
+    broken_chains: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> BuildOptions {
+        BuildOptions {
+            end_markers: true,
+            leading_infix: true,
+            broken_chains: true,
+        }
+    }
 }
 
 fn build_doc<'t>(
@@ -237,10 +298,9 @@ fn build_doc<'t>(
     rules: Rules,
     style: Style,
     layout: indent::Layout,
-    end_markers: bool,
-    leading_infix: bool,
+    options: BuildOptions,
 ) -> Doc<'t> {
-    let mut formatter = Formatter::new(tree, rules, style, layout, end_markers, leading_infix);
+    let mut formatter = Formatter::new(tree, rules, style, layout, options);
     let body = formatter.node(tree.syntax());
     // The file ends with its last code or comment and one line break, as in
     // scalafmt, unless what's at the end is copied verbatim.
@@ -314,6 +374,8 @@ struct Formatter<'t> {
     /// dialect allows it. Elsewhere a broken boolean chain is wrapped in
     /// parentheses.
     leading_infix: bool,
+    /// Whether boolean chains written over several lines are laid out.
+    broken_chains: bool,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -344,8 +406,7 @@ impl<'t> Formatter<'t> {
         rules: Rules,
         style: Style,
         layout: indent::Layout,
-        end_markers: bool,
-        leading_infix: bool,
+        options: BuildOptions,
     ) -> Formatter<'t> {
         Formatter {
             tree,
@@ -369,10 +430,11 @@ impl<'t> Formatter<'t> {
                 .filter_map(|(i, _)| TextSize::try_from(i).ok())
                 .collect(),
             one_line: RefCell::default(),
-            end_markers,
+            end_markers: options.end_markers,
             count_from: Vec::new(),
             dropped_markers: Vec::new(),
-            leading_infix,
+            leading_infix: options.leading_infix,
+            broken_chains: options.broken_chains,
         }
     }
 
@@ -534,10 +596,15 @@ impl<'t> Formatter<'t> {
         let first = first_code_token(&only)?;
         // An `if`'s condition on one line, as the `if`'s layout is decided
         // with the body on its own; and not in parentheses, whose list is.
-        let owner_line = owner.first_token()?.text_range().start();
+        // Asked as the condition will print, not as it's written, so that a
+        // chain that breaks to fit decides as it would on one line.
+        let up_to_keyword: Vec<_> = owner
+            .non_trivia_children()
+            .take_while(|c| c.text_range().start() <= keyword.text_range().start())
+            .collect();
         let split_condition = owner.kind() == SyntaxKind::IfExpression
             && keyword.text() != "else"
-            && self.has_line_break(TextRange::new(owner_line, keyword.text_range().start()));
+            && !self.items_on_one_line(&up_to_keyword);
         let in_parentheses = owner.ancestors().any(|a| {
             matches!(
                 a.kind(),
@@ -704,6 +771,7 @@ impl<'t> Formatter<'t> {
             SyntaxKind::TypeArguments => self.list(node, 1),
             SyntaxKind::TypeParameters => self.list(node, 2),
             SyntaxKind::InfixExpression => self.infix(node),
+            SyntaxKind::ParenthesizedExpression => self.chain_parens(node),
             SyntaxKind::Block => self.braced(node),
             SyntaxKind::CallExpression
             | SyntaxKind::FieldExpression
@@ -1054,11 +1122,129 @@ impl<'t> Formatter<'t> {
     /// don't end a statement, unless it's inside parentheses already, as an
     /// `if` condition or an argument is.
     ///
+    /// The source's line breaks next to the operators don't matter: a chain
+    /// written over several lines is laid out as if written on one.
+    ///
     /// Only `&&` and `||` chains break. With sbt's configuration, scalafmt
     /// never adds breaks inside other infix chains, such as `"org" % "name"
     /// % "1.0"` or string concatenation, and leaves those lines long.
     fn infix(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
-        if !self.can_break(node) {
+        let parts = self.infix_parts(node)?;
+        // A condition without parentheses, as in `if c then`, is Scala 3's
+        // syntax left as written, where a line may start with an operator.
+        let scala3_condition = node.field_name() == Some("condition")
+            && node.parent().is_some_and(|p| {
+                matches!(
+                    p.kind(),
+                    SyntaxKind::IfExpression | SyntaxKind::WhileExpression
+                )
+            });
+        let parens = !self.leading_infix && !scala3_condition && !inside_parentheses(node);
+        let last = last_code_token(&NodeOrToken::Node(node))?;
+        if parens && !self.gap_is_free(TextRange::empty(last.text_range().end())) {
+            return None;
+        }
+        let leading = self.leading_of(node);
+        if !parens {
+            return Some(leading + self.chain_doc(parts).group().from_line_indent());
+        }
+        // The `)` goes before the last token's trailing trivia, such as a
+        // comment.
+        self.trailing_skipped.push(last.text_range().start());
+        let chain = self.chain_doc(parts);
+        // The skip was used up by the last operand: now it's printed.
+        let trailing = self.trailing(last);
+        Some(leading + parenthesized(chain).group().from_line_indent() + trailing)
+    }
+
+    /// Parentheses around a boolean chain where it needs none for its
+    /// grouping, as in `val ok = (a && b)`: the chain's own, which Scala 2
+    /// needs only when the chain is broken. They're printed only then, and
+    /// never in Scala 3, so the result is the same with them or without.
+    fn chain_parens(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
+        let (chain, close) = self.chain_parens_parts(node)?;
+        let parts = self.infix_parts(chain)?;
+        let parens = !self.leading_infix && !inside_parentheses(node);
+        let leading = self.leading_of(node);
+        // `(` and `)` aren't printed, nor the gaps inside them.
+        let last = last_code_token(&NodeOrToken::Node(chain))?;
+        self.trailing_skipped.push(last.text_range().start());
+        self.skip_leading(&NodeOrToken::Node(chain));
+        let chain = self.chain_doc(parts);
+        let trailing = self.trailing(close);
+        let chain = if parens { parenthesized(chain) } else { chain };
+        Some(leading + chain.group().from_line_indent() + trailing)
+    }
+
+    /// The chain inside parentheses [`Self::chain_parens`] leaves out, and
+    /// the `)`.
+    fn chain_parens_parts(
+        &self,
+        node: SyntaxNode<'t>,
+    ) -> Option<(SyntaxNode<'t>, SyntaxToken<'t>)> {
+        if node.kind() != SyntaxKind::ParenthesizedExpression
+            || !needs_no_parentheses(node)
+            || !self.can_relayout(node)
+        {
+            return None;
+        }
+        let children: Vec<_> = node.non_trivia_children().collect();
+        let [
+            NodeOrToken::Token(open),
+            NodeOrToken::Node(chain),
+            NodeOrToken::Token(close),
+        ] = children.as_slice()
+        else {
+            return None;
+        };
+        if open.text() != "(" || close.text() != ")" || self.infix_parts(*chain).is_none() {
+            return None;
+        }
+        let first = first_code_token(&NodeOrToken::Node(*chain))?;
+        let last = last_code_token(&NodeOrToken::Node(*chain))?;
+        let inside = TextRange::new(open.text_range().end(), first.text_range().start());
+        let before_close = TextRange::new(last.text_range().end(), close.text_range().start());
+        (self.gap_is_free(inside) && self.gap_is_free(before_close)).then_some((*chain, *close))
+    }
+
+    /// The operands with the operators before them, each starting a line
+    /// when the chain breaks.
+    fn chain_doc(&mut self, parts: InfixParts<'t>) -> Doc<'t> {
+        let InfixParts {
+            operands,
+            operators,
+            before_operators,
+        } = parts;
+        // The rule prints the gaps around each operator: a space, or a line
+        // break before it.
+        for prev in &before_operators {
+            self.trailing_skipped.push(prev.text_range().start());
+        }
+        let mut operands = operands.into_iter();
+        let first = operands.next().map_or(Doc::Nil, |o| self.element(o));
+        let mut rest = Vec::new();
+        for (op, operand) in operators.into_iter().zip(operands) {
+            self.skip_leading(&NodeOrToken::Token(op));
+            rest.push(Doc::line());
+            rest.push(self.token_without_trailing(op));
+            rest.push(Doc::text(" "));
+            self.skip_leading(&operand);
+            rest.push(self.element(operand));
+        }
+        first + Doc::concat(rest).nest()
+    }
+
+    /// The parts of a boolean chain the [`Self::infix`] rule lays out, or
+    /// `None` if it keeps the chain as written: it has an operator other
+    /// than `&&` and `||`, comments inside, an operand that doesn't print
+    /// on one line, or a gap around an operator the spacing rules don't
+    /// decide. Line breaks next to an operator go, wherever they are.
+    fn infix_parts(&self, node: SyntaxNode<'t>) -> Option<InfixParts<'t>> {
+        if node.kind() != SyntaxKind::InfixExpression
+            || is_part_of_outer_chain(node)
+            || !self.broken_chains && self.has_line_break(node.text_range())
+            || !self.can_relayout(node)
+        {
             return None;
         }
         let (mut operands, mut operators) = (Vec::new(), Vec::new());
@@ -1072,55 +1258,29 @@ impl<'t> Formatter<'t> {
                 .find(|t| !t.is_trivia())?;
             let next = std::iter::successors(op.next_token(), SyntaxToken::next_token)
                 .find(|t| !t.is_trivia())?;
+            // An operator starting a line keeps the gap after it as the
+            // spacing rules see it; here it's the chain's own, so a space
+            // written after it stays one.
+            let after = TextRange::new(op.text_range().end(), next.text_range().start());
+            let spaced_leading = op.is_first_on_line()
+                && self.gap_is_free(after)
+                && !self.text[after].is_empty()
+                && self.text[after].chars().all(|c| c == ' ');
             if self.rule_between(&prev, op) != Some(true)
-                || self.rule_between(op, &next) != Some(true)
+                || !spaced_leading && self.rule_between(op, &next) != Some(true)
             {
                 return None;
             }
             before_operators.push(prev);
         }
-        let last = last_code_token(&NodeOrToken::Node(node))?;
-        // A condition without parentheses, as in `if c then`, is Scala 3's
-        // syntax left as written, where a line may start with an operator.
-        let scala3_condition = node.field_name() == Some("condition")
-            && node.parent().is_some_and(|p| {
-                matches!(
-                    p.kind(),
-                    SyntaxKind::IfExpression | SyntaxKind::WhileExpression
-                )
-            });
-        let parens = !self.leading_infix && !scala3_condition && !inside_parentheses(node);
-        if parens && !self.gap_is_free(TextRange::empty(last.text_range().end())) {
+        if !operands.iter().all(|o| self.prints_on_one_line(o)) {
             return None;
         }
-
-        let leading = self.leading_of(node);
-        // The rule prints the gap before each operator: a space, or a line
-        // break. With parentheses, the `)` goes before the last token's
-        // trailing trivia, such as a comment.
-        for prev in &before_operators {
-            self.trailing_skipped.push(prev.text_range().start());
-        }
-        if parens {
-            self.trailing_skipped.push(last.text_range().start());
-        }
-        let mut operands = operands.into_iter();
-        let first = self.element(operands.next()?);
-        let mut rest = Vec::new();
-        for (op, operand) in operators.into_iter().zip(operands) {
-            rest.push(Doc::line());
-            rest.push(self.token(op));
-            rest.push(self.element(operand));
-        }
-        let chain = first + Doc::concat(rest).nest();
-        if !parens {
-            return Some(leading + chain.group().from_line_indent());
-        }
-        let open = Doc::if_break(Doc::text("("), Doc::Nil);
-        let close = Doc::if_break(Doc::text(")"), Doc::Nil);
-        // The skip was used up by the last operand: now it's printed.
-        let trailing = self.trailing(last);
-        Some(leading + (open + chain + close).group().from_line_indent() + trailing)
+        Some(InfixParts {
+            operands,
+            operators,
+            before_operators,
+        })
     }
 
     /// The parts of a list the [`Self::list`] rule lays out, or `None` if it
@@ -1236,7 +1396,10 @@ impl<'t> Formatter<'t> {
             return known;
         }
         let one_line = self.rules == Rules::Structural
-            && (self.list_parts(*node).is_some() || self.chain_parts(*node).is_some())
+            && (self.list_parts(*node).is_some()
+                || self.chain_parts(*node).is_some()
+                || self.infix_parts(*node).is_some()
+                || self.chain_parens_parts(*node).is_some())
             || self.items_on_one_line(&node.non_trivia_children().collect::<Vec<_>>());
         self.one_line.borrow_mut().insert(*node, one_line);
         one_line
@@ -1756,6 +1919,70 @@ impl<'t> Formatter<'t> {
     }
 }
 
+/// A boolean chain split for [`Formatter::infix`].
+struct InfixParts<'t> {
+    operands: Vec<SyntaxElement<'t>>,
+    operators: Vec<SyntaxToken<'t>>,
+    /// The last token before each operator.
+    before_operators: Vec<SyntaxToken<'t>>,
+}
+
+/// Whether the infix expression is part of the chain around it, as `a && b`
+/// in `a && b && c`, which [`flatten_infix`] merges into it. Only the
+/// outermost node of a chain is laid out: where it's kept as written, so
+/// are its parts.
+fn is_part_of_outer_chain(node: SyntaxNode<'_>) -> bool {
+    fn operator(n: SyntaxNode<'_>) -> Option<SyntaxToken<'_>> {
+        n.non_trivia_children()
+            .find(|c| c.field_name() == Some("operator"))
+            .and_then(|o| o.as_token().copied())
+    }
+    let Some(parent) = node
+        .parent()
+        .filter(|p| p.kind() == SyntaxKind::InfixExpression)
+    else {
+        return false;
+    };
+    let (Some(outer), Some(inner)) = (operator(parent), operator(node)) else {
+        return false;
+    };
+    let right_assoc = outer.text().ends_with(':');
+    precedence(outer.text()) == precedence(inner.text())
+        && inner.text().ends_with(':') == right_assoc
+        && node.field_name() == Some(if right_assoc { "right" } else { "left" })
+}
+
+/// A broken chain in parentheses; on one line, without them.
+fn parenthesized(chain: Doc<'_>) -> Doc<'_> {
+    Doc::if_break(Doc::text("("), Doc::Nil) + chain + Doc::if_break(Doc::text(")"), Doc::Nil)
+}
+
+/// Whether parentheses, `node`, are where what's inside them needs none
+/// for its grouping: the whole of a definition's body, an assignment's
+/// right side, a lambda's or case's body, an `if` branch, a returned
+/// value, or a statement.
+fn needs_no_parentheses(node: SyntaxNode<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return false;
+    };
+    let field = node.field_name();
+    match parent.kind() {
+        SyntaxKind::FunctionDefinition => field == Some("body"),
+        SyntaxKind::ValDefinition | SyntaxKind::VarDefinition => field == Some("value"),
+        SyntaxKind::AssignmentExpression => field == Some("right"),
+        SyntaxKind::CaseClause => field == Some("body"),
+        SyntaxKind::IfExpression => matches!(field, Some("consequence" | "alternative")),
+        SyntaxKind::LambdaExpression | SyntaxKind::ReturnExpression => {
+            parent.non_trivia_children().last() == Some(NodeOrToken::Node(node))
+        }
+        SyntaxKind::Block
+        | SyntaxKind::TemplateBody
+        | SyntaxKind::IndentedBlock
+        | SyntaxKind::CompilationUnit => field.is_none(),
+        _ => false,
+    }
+}
+
 /// A chain split for [`Formatter::select_chain`].
 struct ChainParts<'t> {
     /// The head, with what stays on its line: arguments right after it, and
@@ -1933,18 +2160,14 @@ fn flatten_infix<'t>(
     Some(())
 }
 
-/// Whether `node` is inside parentheses or brackets, with no braces or
-/// indented block between: there, in Scala 2, a line break doesn't end a
-/// statement, so a line may start with an infix operator.
+/// Whether `node` is inside parentheses or brackets, with no braces
+/// between: there, in Scala 2, a line break doesn't end a statement, so a
+/// line may start with an infix operator. What tree-sitter-scala reads as
+/// an indented block, as a lambda's body on the line after its arrow, is
+/// no region in Scala 2, where this is asked.
 fn inside_parentheses(node: SyntaxNode<'_>) -> bool {
     let mut child = node;
     while let Some(parent) = child.parent() {
-        if matches!(
-            parent.kind(),
-            SyntaxKind::IndentedBlock | SyntaxKind::IndentedCases
-        ) {
-            return false;
-        }
         // The brackets among the parent's own tokens still open at `child`.
         let mut open = Vec::new();
         for c in parent.children_with_tokens() {

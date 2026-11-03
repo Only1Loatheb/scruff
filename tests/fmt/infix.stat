@@ -2,7 +2,8 @@
 # operator, with the operators starting the lines after the first, indented
 # 2 spaces from the line the chain starts on. In Scala 2, where a line can't
 # start with an operator, the broken chain is wrapped in parentheses unless
-# it's inside some already, as an `if` condition or an argument is.
+# it's inside some already, as an `if` condition or an argument is. The
+# source's line breaks next to the operators don't matter.
 maxColumn = 40
 
 <<< a chain that fits stays on one line
@@ -142,7 +143,7 @@ xs.filter { x =>
     && epsilon)
 }
 
-<<< Scala 2: parentheses around the chain stay
+<<< Scala 2: parentheses around a broken chain are its own
 dialect = scala213
 ===
 val ok = (alpha && beta && gamma && delta1)
@@ -151,6 +152,39 @@ val ok = (alpha
   && beta
   && gamma
   && delta1)
+
+<<< Scala 2: so they go when it fits
+dialect = scala213
+===
+val ok = (alpha
+  && beta)
+val no = (alpha &&
+  beta)
+>>>
+val ok = alpha && beta
+val no = alpha && beta
+
+<<< Scala 3 needs no parentheses
+val ok = (alpha && beta && gamma && delta1)
+def f = (alpha && beta)
+>>>
+val ok = alpha
+  && beta
+  && gamma
+  && delta1
+def f = alpha && beta
+
+<<< parentheses needed for grouping stay
+dialect = scala213
+===
+val n = count + (alpha &&
+  beta)
+val m = (alpha && beta) || (gamma &&
+  delta)
+>>>
+val n = count + (alpha && beta)
+val m = ((alpha && beta)
+  || (gamma && delta))
 
 <<< Scala 2: an `if` condition in Scala 3's syntax, left as written, gets none
 dialect = scala213
@@ -175,9 +209,88 @@ object A {
     }
 }
 
-<<< a chain written over several lines keeps its line breaks
+<<< a chain written over several lines is laid out as one written on one
 val ok = alpha &&
     beta && gamma
+val no = alpha
+      && beta
+      && gamma
+val long = alpha &&
+  beta && gamma && delta
 >>>
-val ok = alpha &&
+val ok = alpha && beta && gamma
+val no = alpha && beta && gamma
+val long = alpha
+  && beta
+  && gamma
+  && delta
+
+<<< a block on the chain's last line is indented from the `if`
+dialect = scala213
+===
+object A {
+  if (alphaAlpha && betaBeta &&
+      gammaGamma && deltaDelta) {
+    body()
+  }
+}
+>>>
+object A {
+  if (alphaAlpha
+    && betaBeta
+    && gammaGamma
+    && deltaDelta) {
+    body()
+  }
+}
+
+<<< Scala 2: a lambda's body on its own line is still inside the parentheses
+dialect = scala213
+===
+xs.filterNot(x => alphaAlpha && betaBeta && gammaGamma && x > 1)
+>>>
+xs.filterNot(x =>
+  alphaAlpha
+    && betaBeta
+    && gammaGamma
+    && x > 1
+)
+
+<<< kept as written where tree-sitter-scala reads the lines after it by its line breaks
+maxColumn = 200
+===
+object A {
+  def f = {
+    pat match {
+      case IdPattern(id, tpt) =>
+            val (firstDef, splitRhs) = rhs match
+              case TuplePattern(elems) if opt == SimpleTuple
+                                       && variables.forall((n, _) => n != nme) =>
+                for ((named, tpt), idx) <- variables if named.name != nme
+                yield
+                    valDef(
+                  )
+              flatTree(firstDef ++ restDefs)
+    }
+  }
+}
+>>>
+object A:
+  def f =
+    pat match
+      case IdPattern(id, tpt) =>
+            val (firstDef, splitRhs) = rhs match
+              case TuplePattern(elems) if opt == SimpleTuple
+                                       && variables.forall((n, _) => n != nme) =>
+                for ((named, tpt), idx) <- variables if named.name != nme
+                yield
+                  valDef(
+                )
+              flatTree(firstDef ++ restDefs)
+
+<<< a chain with a comment inside keeps its line breaks
+val ok = alpha && // why
+    beta && gamma
+>>>
+val ok = alpha && // why
     beta && gamma
