@@ -20,13 +20,13 @@
 //! Each case also checks that formatting the expected output leaves it
 //! unchanged.
 //!
-//! The dialect is scuff's default, `scala3`, unless the file or case names
+//! The dialect is scruff's default, `scala3`, unless the file or case names
 //! another.
 
 use std::path::{Path, PathBuf};
 
-use scuff::config::Dialect;
-use scuff::fmt::{FormatError, FormatOptions, format};
+use scruff::config::Dialect;
+use scruff::fmt::{FormatError, FormatOptions, format};
 
 struct Case {
     file: PathBuf,

@@ -1,4 +1,4 @@
-//! scuff: tools for working with Scala source code.
+//! scruff: tools for working with Scala source code.
 
 pub mod config;
 pub mod doc;

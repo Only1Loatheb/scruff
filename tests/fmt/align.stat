@@ -148,7 +148,7 @@ val y = x match { case 1 => "one"; case _ => "other" }
 val y = x match { case 1 => "one"; case _ => "other" }
 
 <<< SKIP match with dot complex (scala3/Match.stat:14)
-# scuff doesn't yet: needs select chains written over several lines, and cases at inconsistent widths, laid out.
+# scruff doesn't yet: needs select chains written over several lines, and cases at inconsistent widths, laid out.
 ===
 def mtch(int: Int): String =
             int.hello().thisIsALongMethodName().match {
@@ -175,7 +175,7 @@ def mtch(int: Int): String =
     }
 
 <<< SKIP match with dot complex inside (scala3/Match.stat:38)
-# scuff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
+# scruff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
 maxColumn = 50
 ===
 def mtch(int: Int): String =
@@ -198,7 +198,7 @@ def mtch(int: Int): String =
   }
 
 <<< SKIP select with dot complex inside (scala3/Match.stat:59)
-# scuff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
+# scruff doesn't yet: joins `{` and `case a =>` onto one line, and lays out a select chain written over several lines.
 maxColumn = 50
 ===
 def mtch(int: Int): String =
@@ -319,7 +319,7 @@ type Elem[X] = X match {
 }
 
 <<< SKIP recursive match type (scala3/MatchType.stat:22)
-# scuff doesn't yet: moves a `}` after the last clause onto its own line.
+# scruff doesn't yet: moves a `}` after the last clause onto its own line.
 ===
 type Len[X] <: Int = X match {
            case Unit => 0
@@ -331,7 +331,7 @@ type Len[X] <: Int = X match {
 }
 
 <<< SKIP pattern match (scala3/Vararg.stat:10)
-# scuff doesn't yet: moves clauses after `{` and before `}` onto lines of their own.
+# scruff doesn't yet: moves clauses after `{` and before `}` onto lines of their own.
 ===
 a match {case List(xs*) => 1 
 case Nil => 2}
@@ -342,7 +342,7 @@ a match {
 }
 
 <<< SKIP typed pat scalafmt/issues/2424 (scala3/Issues.stat:10)
-# scuff doesn't yet: re-indents code whose indentation is inconsistent.
+# scruff doesn't yet: re-indents code whose indentation is inconsistent.
 ===
   def f(s: String): Double =
    val re =  """.*(\d+).*""".r
@@ -357,7 +357,7 @@ def f(s: String): Double =
     case _             => 0.0
 
 <<< SKIP issue 1509 (test/Issue1509.stat:2)
-# scuff doesn't yet: re-indents code whose indentation is inconsistent.
+# scruff doesn't yet: re-indents code whose indentation is inconsistent.
 maxColumn = 41
 ===
 val x =

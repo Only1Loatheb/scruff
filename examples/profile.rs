@@ -5,9 +5,9 @@
 //! ```
 //!
 //! Each path is a Scala file or a directory searched for them, following
-//! `.gitignore` and the nearest `.scuff.toml` or `.scalafmt.conf` as `scuff
+//! `.gitignore` and the nearest `.scruff.toml` or `.scalafmt.conf` as `scruff
 //! format` does. The files are formatted `--runs` times (default 1) on one
-//! thread, so the stacks read cleanly, with a deep stack as in `scuff
+//! thread, so the stacks read cleanly, with a deep stack as in `scruff
 //! format`, and the samples are written as an SVG flamegraph to `--out`
 //! (default `flamegraph.svg`).
 //!
@@ -27,16 +27,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[cfg(unix)]
-use scuff::config::{Config, Locator};
+use scruff::config::{Config, Locator};
 #[cfg(unix)]
-use scuff::fmt::{self, FormatOptions};
+use scruff::fmt::{self, FormatOptions};
 
 /// Samples per second.
 #[cfg(unix)]
 const FREQUENCY: i32 = 999;
 
 /// Formatting is recursive, so deep nesting needs a deep stack, as in
-/// `scuff format`.
+/// `scruff format`.
 #[cfg(unix)]
 const STACK_SIZE: usize = 256 << 20;
 

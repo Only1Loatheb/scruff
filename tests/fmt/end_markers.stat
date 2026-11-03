@@ -705,7 +705,7 @@ object A:
     b
   end f // why
 
-<<< a marker on a body of one expression stays, as scuff wouldn't add it
+<<< a marker on a body of one expression stays, as scruff wouldn't add it
 object A:
   def f =
     if c then

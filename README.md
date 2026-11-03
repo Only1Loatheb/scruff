@@ -1,16 +1,16 @@
-# Scuff
+# Scruff
 
-## Scuff formatter
+## Scruff formatter
 
-Scuff is a fast and normalizing Scala code formatter.
+Scruff is a fast and normalizing Scala code formatter.
 Inspired by Python's code formatters like [Black](https://pypi.org/project/black/) and [Ruff](https://docs.astral.sh/ruff/formatter/),
-Scuff removes all configurations related to styling.
+Scruff removes all configurations related to styling.
 
 ## Philosophy
 
-Scuff is intended to be normalizing, which means that the scuffed code
+Scruff is intended to be normalizing, which means that the _scruffed_ code
 looks the same regardless of how it started.
 
 ## License
 
-Scuff is provided under MIT License.
+Scruff is provided under MIT License.

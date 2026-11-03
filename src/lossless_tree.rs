@@ -1199,8 +1199,8 @@ object Main extends App {
     }
 }
 
-/// Checks every `.scala` file under `modules/` (the sbt, cats and scala3
-/// submodules), or under `$SCUFF_CORPUS` if set. Run with:
+/// Checks every `.scala` file under `corpora/` (the sbt, cats and scala3
+/// submodules), or under `$SCRUFF_CORPUS` if set. Run with:
 /// `cargo test --release corpus -- --ignored --nocapture`
 #[cfg(test)]
 pub(crate) mod corpus {
@@ -1208,16 +1208,16 @@ pub(crate) mod corpus {
     use rayon::prelude::*;
     use std::path::{Path, PathBuf};
 
-    /// The `.scala` files under `$SCUFF_CORPUS`, or under `modules/`.
+    /// The `.scala` files under `$SCRUFF_CORPUS`, or under `corpora/`.
     pub(crate) fn corpus_files() -> Vec<PathBuf> {
-        let root = std::env::var_os("SCUFF_CORPUS")
+        let root = std::env::var_os("SCRUFF_CORPUS")
             .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("modules"));
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("corpora"));
         let mut files = Vec::new();
         scala_files(&root, &mut files);
         assert!(
             !files.is_empty(),
-            "no .scala files under {}; run `git submodule update --init` or set SCUFF_CORPUS",
+            "no .scala files under {}; run `git submodule update --init` or set SCRUFF_CORPUS",
             root.display()
         );
         files
@@ -1255,7 +1255,7 @@ pub(crate) mod corpus {
     }
 
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_widened_spaces_are_equivalent() {
         let files = corpus_files();
         // For each file, None if it's skipped, or else the difference.
@@ -1288,7 +1288,7 @@ pub(crate) mod corpus {
     /// Reports how many indentation regions a formatter would have to leave
     /// alone, by reason, with a few examples of each.
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_indentation_region_problems() {
         let files = corpus_files();
         // For each file, its regions and the problems among them.
@@ -1334,7 +1334,7 @@ pub(crate) mod corpus {
     }
 
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_round_trips() {
         let files = corpus_files();
         // For each file: its comments, whether it has syntax errors, and

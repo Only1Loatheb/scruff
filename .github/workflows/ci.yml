@@ -21,7 +21,7 @@ jobs:
     steps:
       # Keep LF endings so the .stat fixtures match on Windows.
       - run: git config --global core.autocrlf false
-      # Submodules (modules/) are skipped: tests that use them skip when absent.
+      # Submodules (corpora/) are skipped: tests that use them skip when absent.
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -71,15 +71,15 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name=scuff-${{ matrix.name }}-$VERSION
+          name=scruff-${{ matrix.name }}-$VERSION
           mkdir "$name"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/${{ matrix.target }}/release/scuff.exe "$name/"
+            cp target/${{ matrix.target }}/release/scruff.exe "$name/"
             cp LICENSE "$name/"
             7z a "$name.zip" "$name"
             echo "ASSET=$name.zip" >> "$GITHUB_ENV"
           else
-            cp target/${{ matrix.target }}/release/scuff "$name/"
+            cp target/${{ matrix.target }}/release/scruff "$name/"
             cp LICENSE "$name/"
             tar czf "$name.tar.gz" "$name"
             echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
@@ -87,7 +87,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: scuff-${{ matrix.name }}
+          name: scruff-${{ matrix.name }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
 
@@ -116,22 +116,22 @@ jobs:
       - name: Package
         run: |
           mkdir -p target/universal-apple-darwin/release
-          lipo -create -output target/universal-apple-darwin/release/scuff \
-            target/aarch64-apple-darwin/release/scuff \
-            target/x86_64-apple-darwin/release/scuff
-          lipo -info target/universal-apple-darwin/release/scuff
+          lipo -create -output target/universal-apple-darwin/release/scruff \
+            target/aarch64-apple-darwin/release/scruff \
+            target/x86_64-apple-darwin/release/scruff
+          lipo -info target/universal-apple-darwin/release/scruff
           for target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
-            name=scuff-$target-$VERSION
+            name=scruff-$target-$VERSION
             mkdir "$name"
-            cp target/$target/release/scuff "$name/"
+            cp target/$target/release/scruff "$name/"
             cp LICENSE "$name/"
             tar czf "$name.tar.gz" "$name"
           done
 
       - uses: actions/upload-artifact@v7
         with:
-          name: scuff-macos
-          path: scuff-*-apple-darwin-*.tar.gz
+          name: scruff-macos
+          path: scruff-*-apple-darwin-*.tar.gz
           if-no-files-found: error
 
   release:

@@ -1,25 +1,25 @@
 //! A project's configuration: which files to format, and the line width.
 //!
-//! scuff uses the nearest `.scuff.toml` or `.scalafmt.conf` in a file's
-//! directory or one above it, `.scuff.toml` first when a directory has
+//! scruff uses the nearest `.scruff.toml` or `.scalafmt.conf` in a file's
+//! directory or one above it, `.scruff.toml` first when a directory has
 //! both. Only that one file counts.
 //!
-//! `.scuff.toml` has these keys:
+//! `.scruff.toml` has these keys:
 //!
 //! - `max-column`, 100 by default.
 //! - `dialect`, the Scala dialect, by scalafmt's names: `scala3`,
 //!   `scala213source3`, `scala212source3`, `scala213` or `sbt1`; `scala3`
-//!   by default. scuff rewrites code to the new
+//!   by default. scruff rewrites code to the new
 //!   syntax it allows.
 //! - `include-paths` and `exclude-paths`: `glob:` or `regex:` patterns, in
 //!   the syntax of Java's `PathMatcher`, which must match a file's whole
 //!   absolute path. Include paths default to `.scala`, `.sbt`, `.sc` and
 //!   `.mill` files.
 //!
-//! From `.scalafmt.conf`, scuff reads only these settings, with scalafmt's
+//! From `.scalafmt.conf`, scruff reads only these settings, with scalafmt's
 //! meaning:
 //!
-//! - `maxColumn`, or scuff's own 100 when the file doesn't set it, where
+//! - `maxColumn`, or scruff's own 100 when the file doesn't set it, where
 //!   scalafmt would use 80.
 //! - `project.includePaths` and `project.excludePaths`, the same patterns.
 //! - `project.includeFilters` and `project.excludeFilters`, their older
@@ -27,7 +27,7 @@
 //!   replace the default include paths unless those are set as well.
 //! - `runner.dialect`, also under `fileOverride`, whose patterns are
 //!   tried longest first, as in scalafmt. The dialect is `scala3` when
-//!   none is named. `runner.dialectOverride` isn't read: what scuff
+//!   none is named. `runner.dialectOverride` isn't read: what scruff
 //!   rewrites goes with the dialect's name alone.
 
 use std::collections::HashMap;
@@ -36,17 +36,17 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
-/// scuff's own configuration file.
-pub const SCUFF_FILE: &str = ".scuff.toml";
+/// scruff's own configuration file.
+pub const SCRUFF_FILE: &str = ".scruff.toml";
 
-/// scalafmt's configuration file, which scuff reads a few settings from.
+/// scalafmt's configuration file, which scruff reads a few settings from.
 pub const SCALAFMT_FILE: &str = ".scalafmt.conf";
 
 /// scalafmt's `project.includePaths` when a configuration doesn't set it.
 const DEFAULT_INCLUDE_PATHS: [&str; 4] =
     ["glob:**.scala", "glob:**.sbt", "glob:**.sc", "glob:**.mill"];
 
-/// The settings scuff takes from a configuration file.
+/// The settings scruff takes from a configuration file.
 #[derive(Debug)]
 pub struct Config {
     /// The configuration file.
@@ -63,7 +63,7 @@ pub struct Config {
     dialect_overrides: Vec<(Matcher, Dialect)>,
 }
 
-/// What new syntax a Scala dialect allows, which decides what scuff
+/// What new syntax a Scala dialect allows, which decides what scruff
 /// rewrites to it. Named after scalameta's dialect flags.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dialect {
@@ -102,7 +102,7 @@ pub struct Dialect {
     pub leading_infix_operators: bool,
 }
 
-/// The dialects scuff knows, by scalafmt's names.
+/// The dialects scruff knows, by scalafmt's names.
 const DIALECTS: [&str; 5] = [
     "scala3",
     "scala213source3",
@@ -112,7 +112,7 @@ const DIALECTS: [&str; 5] = [
 ];
 
 impl Dialect {
-    /// Scala 3, scuff's dialect when none is named.
+    /// Scala 3, scruff's dialect when none is named.
     pub const SCALA3: Dialect = Dialect {
         star_wildcard_import: true,
         as_for_import_rename: true,
@@ -220,7 +220,7 @@ struct Patterns {
 }
 
 impl Config {
-    /// The configuration in the nearest `.scuff.toml` or `.scalafmt.conf` in
+    /// The configuration in the nearest `.scruff.toml` or `.scalafmt.conf` in
     /// `dir` or a directory above it, if there is one.
     pub fn find(dir: &Path) -> Result<Option<Config>, ConfigError> {
         Config::locate(dir)
@@ -228,13 +228,13 @@ impl Config {
             .transpose()
     }
 
-    /// The nearest `.scuff.toml` or `.scalafmt.conf` in `dir` or a
+    /// The nearest `.scruff.toml` or `.scalafmt.conf` in `dir` or a
     /// directory above it, without reading it.
     pub fn locate(dir: &Path) -> Option<PathBuf> {
         Locator::default().locate(dir)
     }
 
-    /// Reads a `.scuff.toml`, or else a `.scalafmt.conf`.
+    /// Reads a `.scruff.toml`, or else a `.scalafmt.conf`.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let error = |message: String| ConfigError {
             path: path.to_path_buf(),
@@ -360,7 +360,7 @@ impl Config {
             let mut keys: Vec<_> = overrides.keys().filter(|k| !k.is_empty()).collect();
             keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
             for key in keys {
-                // Languages need scalafmt's project layout, which scuff
+                // Languages need scalafmt's project layout, which scruff
                 // doesn't read.
                 if key.starts_with("lang:") {
                     continue;
@@ -455,7 +455,7 @@ impl Config {
         self.exclude_dirs.iter().any(|m| m.0.is_match(&path))
     }
 
-    /// Whether a file with no configuration is one scuff formats when it
+    /// Whether a file with no configuration is one scruff formats when it
     /// finds it in a directory: a `.scala`, `.sbt`, `.sc` or `.mill` file.
     pub fn included_by_default(file: &Path) -> bool {
         file.extension()
@@ -480,7 +480,7 @@ pub struct Locator {
 }
 
 impl Locator {
-    /// The nearest `.scuff.toml` or `.scalafmt.conf` in `dir` or a
+    /// The nearest `.scruff.toml` or `.scalafmt.conf` in `dir` or a
     /// directory above it.
     pub fn locate(&mut self, dir: &Path) -> Option<PathBuf> {
         let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
@@ -492,7 +492,7 @@ impl Locator {
                 break;
             }
             visited.push(dir.to_path_buf());
-            if let Some(path) = [SCUFF_FILE, SCALAFMT_FILE]
+            if let Some(path) = [SCRUFF_FILE, SCALAFMT_FILE]
                 .map(|name| dir.join(name))
                 .into_iter()
                 .find(|path| path.is_file())
@@ -520,7 +520,7 @@ fn match_text(path: &Path) -> String {
     }
 }
 
-/// Whether the file is a `.scuff.toml`, or another TOML file.
+/// Whether the file is a `.scruff.toml`, or another TOML file.
 fn is_toml(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "toml")
 }
@@ -759,13 +759,13 @@ mod tests {
         assert!(c.includes(Path::new("/p/other/A.scala")));
     }
 
-    fn scuff_config(text: &str) -> Result<Config, ConfigError> {
-        Config::parse(Path::new("/p/.scuff.toml"), text)
+    fn scruff_config(text: &str) -> Result<Config, ConfigError> {
+        Config::parse(Path::new("/p/.scruff.toml"), text)
     }
 
     #[test]
-    fn scuff_toml() {
-        let c = scuff_config(
+    fn scruff_toml() {
+        let c = scruff_config(
             r#"
             max-column = 120
             exclude-paths = ["glob:**/gen/**"]
@@ -775,22 +775,22 @@ mod tests {
         assert_eq!(c.max_column, 120);
         assert!(c.includes(Path::new("/p/src/A.scala")));
         assert!(!c.includes(Path::new("/p/gen/A.scala")));
-        let c = scuff_config(r#"include-paths = ["glob:**/core/**.scala"]"#).unwrap();
+        let c = scruff_config(r#"include-paths = ["glob:**/core/**.scala"]"#).unwrap();
         assert!(c.includes(Path::new("/p/core/src/A.scala")));
         assert!(!c.includes(Path::new("/p/other/A.scala")));
     }
 
     #[test]
-    fn scuff_toml_defaults() {
-        let c = scuff_config("").unwrap();
+    fn scruff_toml_defaults() {
+        let c = scruff_config("").unwrap();
         assert_eq!(c.max_column, 100);
         assert!(c.includes(Path::new("/p/build.sbt")));
         assert!(!c.includes(Path::new("/p/A.java")));
     }
 
     #[test]
-    fn scuff_toml_errors() {
-        let message = |text| scuff_config(text).unwrap_err().message;
+    fn scruff_toml_errors() {
+        let message = |text| scruff_config(text).unwrap_err().message;
         assert!(message("maxColumn = 120").contains("unknown key \"maxColumn\""));
         assert!(message("max-column = \"wide\"").contains("positive number"));
         assert!(message("exclude-paths = \"glob:**\"").contains("list of strings"));
@@ -799,20 +799,20 @@ mod tests {
     }
 
     #[test]
-    fn scuff_toml_comes_first() {
-        let dir = std::env::temp_dir().join(format!("scuff-config-{}", std::process::id()));
+    fn scruff_toml_comes_first() {
+        let dir = std::env::temp_dir().join(format!("scruff-config-{}", std::process::id()));
         let sub = dir.join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(dir.join(SCALAFMT_FILE), "maxColumn = 80").unwrap();
         // Only `.scalafmt.conf`.
         let found = Config::find(&sub).unwrap().unwrap();
         assert_eq!(found.max_column, 80);
-        // Both: `.scuff.toml` alone counts, so its default width applies.
-        std::fs::write(dir.join(SCUFF_FILE), "").unwrap();
+        // Both: `.scruff.toml` alone counts, so its default width applies.
+        std::fs::write(dir.join(SCRUFF_FILE), "").unwrap();
         let found = Config::find(&sub).unwrap().unwrap();
-        assert_eq!(found.path, dir.join(SCUFF_FILE));
+        assert_eq!(found.path, dir.join(SCRUFF_FILE));
         assert_eq!(found.max_column, 100);
-        // A nearer `.scalafmt.conf` still wins over a farther `.scuff.toml`.
+        // A nearer `.scalafmt.conf` still wins over a farther `.scruff.toml`.
         std::fs::write(sub.join(SCALAFMT_FILE), "maxColumn = 60").unwrap();
         assert_eq!(Config::find(&sub).unwrap().unwrap().max_column, 60);
         // A locator shared between directories finds the same files.
@@ -824,7 +824,7 @@ mod tests {
             locator.locate(&sub.join("a")),
             Some(sub.join(SCALAFMT_FILE))
         );
-        assert_eq!(locator.locate(&dir), Some(dir.join(SCUFF_FILE)));
+        assert_eq!(locator.locate(&dir), Some(dir.join(SCRUFF_FILE)));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -940,11 +940,11 @@ mod tests {
     }
 
     #[test]
-    fn scuff_toml_dialect() {
-        let c = scuff_config("dialect = \"scala213\"").unwrap();
+    fn scruff_toml_dialect() {
+        let c = scruff_config("dialect = \"scala213\"").unwrap();
         assert!(!c.dialect_for(None).star_wildcard_import);
-        assert_eq!(scuff_config("").unwrap().dialect_for(None), Dialect::SCALA3);
-        assert!(scuff_config("dialect = \"scala4\"").is_err());
+        assert_eq!(scruff_config("").unwrap().dialect_for(None), Dialect::SCALA3);
+        assert!(scruff_config("dialect = \"scala4\"").is_err());
     }
 
     #[test]
@@ -956,7 +956,7 @@ mod tests {
     /// Every `.scalafmt.conf` in the corpus loads.
     #[test]
     fn corpus_configs_load() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("modules");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpora");
         let mut found = 0;
         for project in ["sbt", "cats", "scala3"] {
             let path = root.join(project).join(SCALAFMT_FILE);

@@ -23,7 +23,7 @@ use crate::lossless_tree::{
 pub struct FormatOptions {
     /// Defaults to 100, sbt's scalafmt `maxColumn`.
     pub max_width: usize,
-    /// The code's Scala dialect, whose new syntax scuff rewrites to.
+    /// The code's Scala dialect, whose new syntax scruff rewrites to.
     /// Defaults to Scala 3.
     pub dialect: Dialect,
 }
@@ -81,7 +81,7 @@ enum Rules {
     Fallback,
 }
 
-/// Choices scuff makes for everyone, gathered in one place so they're easy
+/// Choices scruff makes for everyone, gathered in one place so they're easy
 /// to revisit. They aren't options: `format` always uses [`STYLE`], and
 /// tests may try others.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,7 +111,7 @@ struct Style {
 ///
 /// End markers follow sbt's `rewrite.scala3.endMarker.insert.breaks.min =
 /// 20`. sbt doesn't remove them from short statements, and neither does
-/// scuff.
+/// scruff.
 const STYLE: Style = Style {
     max_blank_lines_in_templates: 2,
     max_blank_lines_in_blocks: 1,
@@ -2863,7 +2863,7 @@ mod tests {
     /// rewritten, which leaves it as written. Run with:
     /// `cargo test --release corpus_rewrites -- --ignored --nocapture`
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_rewrites_to_the_dialect() {
         use crate::config::Dialect;
         let files = crate::lossless_tree::corpus::corpus_files();
@@ -2984,7 +2984,7 @@ mod tests {
         }
         for failure in failures
             .iter()
-            .take(std::env::var("SCUFF_SHOW").map_or(15, |n| n.parse().unwrap_or(15)))
+            .take(std::env::var("SCRUFF_SHOW").map_or(15, |n| n.parse().unwrap_or(15)))
         {
             println!("{failure}");
         }
@@ -2996,7 +2996,7 @@ mod tests {
     /// result is equivalent and is stable when formatted again. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_formats_every_file() {
         let files = crate::lossless_tree::corpus::corpus_files();
         /// What became of one file.
@@ -3144,7 +3144,7 @@ mod tests {
     /// The same check over the corpus. Run with:
     /// `cargo test --release corpus -- --ignored --nocapture`
     #[test]
-    #[ignore = "slow; runs over modules/ or $SCUFF_CORPUS"]
+    #[ignore = "slow; runs over corpora/ or $SCRUFF_CORPUS"]
     fn corpus_structural_rules_match_fallback() {
         let files = crate::lossless_tree::corpus::corpus_files();
         let failures: Vec<String> = files
@@ -3162,15 +3162,15 @@ mod tests {
         assert!(failures.is_empty());
     }
 
-    /// sbt's code is formatted by scalafmt with the configuration scuff
-    /// follows, so every change scuff makes to it is a disagreement with
+    /// sbt's code is formatted by scalafmt with the configuration scruff
+    /// follows, so every change scruff makes to it is a disagreement with
     /// scalafmt. Writes the changed files out to compare, without failing.
     /// Run with:
     /// `cargo test --release corpus_sbt -- --ignored --nocapture`
     #[test]
-    #[ignore = "slow; reports differences from scalafmt over modules/sbt"]
+    #[ignore = "slow; reports differences from scalafmt over corpora/sbt"]
     fn corpus_sbt_differences_from_scalafmt() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("modules/sbt");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpora/sbt");
         // The files sbt's `.scalafmt.conf` formats, at its width and in its
         // dialects.
         let config = crate::config::Config::load(&root.join(crate::config::SCALAFMT_FILE)).unwrap();

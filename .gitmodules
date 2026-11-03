@@ -1,12 +1,12 @@
-[submodule "modules/sbt"]
-	path = modules/sbt
+[submodule "corpora/sbt"]
+	path = corpora/sbt
 	url = https://github.com/sbt/sbt.git
 	shallow = true
-[submodule "modules/cats"]
-	path = modules/cats
+[submodule "corpora/cats"]
+	path = corpora/cats
 	url = https://github.com/typelevel/cats.git
 	shallow = true
-[submodule "modules/scala3"]
-	path = modules/scala3
+[submodule "corpora/scala3"]
+	path = corpora/scala3
 	url = https://github.com/scala/scala3.git
 	shallow = true

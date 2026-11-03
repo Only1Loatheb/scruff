@@ -8,9 +8,9 @@ use std::time::Duration;
 use anstyle::{AnsiColor, Style};
 use clap::{Parser, Subcommand, ValueEnum};
 use rayon::prelude::*;
-use scuff::config::{Config, Locator};
-use scuff::fmt;
-use scuff::lossless_tree;
+use scruff::config::{Config, Locator};
+use scruff::fmt;
+use scruff::lossless_tree;
 
 /// Tools for working with Scala source code.
 #[derive(Parser)]
@@ -27,8 +27,8 @@ enum Command {
     /// A directory stands for the files in it and below it, except hidden
     /// ones and what `.gitignore` leaves out.
     ///
-    /// Each file follows the nearest `.scuff.toml` or `.scalafmt.conf` in
-    /// its directory or above, `.scuff.toml` first: files its exclude paths
+    /// Each file follows the nearest `.scruff.toml` or `.scalafmt.conf` in
+    /// its directory or above, `.scruff.toml` first: files its exclude paths
     /// leave out are skipped, and lines are kept within its maximum column.
     ///
     /// Ends with a count of the files changed and left unchanged.
@@ -520,7 +520,7 @@ fn directory_of(file: &Path) -> PathBuf {
     }
 }
 
-/// The options for `file` under `config`, or scuff's own without one. With
+/// The options for `file` under `config`, or scruff's own without one. With
 /// no file, as for standard input, the dialect is the one no `fileOverride`
 /// pattern changes.
 fn options(config: Option<&Config>, file: Option<&Path>) -> fmt::FormatOptions {
