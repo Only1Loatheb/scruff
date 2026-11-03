@@ -918,6 +918,16 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
         return None;
     }
     let before = previous_code(open)?;
+    // scalac rejects a colon argument after a braced one, `f { a }: x =>`,
+    // and `case` clauses after a colon in a `for` generator on the `for`
+    // line; to be safe, nothing in a `for`'s enumerators is rewritten.
+    if before.text() == "}"
+        || call
+            .ancestors()
+            .any(|a| a.kind() == SyntaxKind::Enumerators)
+    {
+        return None;
+    }
     let at = |offset: TextSize| usize::from(offset);
     let line_start = |offset: TextSize| text[..at(offset)].rfind('\n').map_or(0, |i| i + 1);
     let indent = |offset: TextSize| {
@@ -1995,6 +2005,11 @@ mod tests {
             // read both as one literal.
             "val a = xs.map { x =>\n  <a/>\n}\n\n<b/>\n",
             "val a = xs.map { x => <a/> }\n<b/>\n",
+            // A second braced argument: scalac rejects `f { a }: x =>`.
+            "f { a } { x =>\n  b\n}\n",
+            "f { a } {\n  case x => b\n}\n",
+            // In a `for` generator.
+            "for c <- xs.collectFirst {\n    case 1 => 1\n  }\ndo f(c)\n",
         ] {
             assert_eq!(changed(same, fewer), None, "{same}");
         }
