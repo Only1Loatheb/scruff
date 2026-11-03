@@ -976,6 +976,15 @@ pub(super) fn fewer_braces(tree: &Tree, call: SyntaxNode<'_>) -> Option<Vec<Edit
     {
         return None;
     }
+    // scalac reads XML elements separated by whitespace as one `NodeSeq`,
+    // whatever their indentation, so without the `}` a body ending in XML
+    // would take in XML that follows it.
+    let in_xml = last
+        .parent()
+        .is_some_and(|p| p.ancestors().any(|a| a.kind() == SyntaxKind::XmlExpression));
+    if in_xml && after.is_some_and(|a| a.text().starts_with('<')) {
+        return None;
+    }
     let colon = (
         TextRange::new(before.text_range().end(), open.text_range().end()),
         ":".to_string(),
@@ -1982,6 +1991,10 @@ mod tests {
             "xs ++ {\n  a\n}\n",
             // Not deeper than the `}`.
             "xs.map { x =>\na\n}\n",
+            // A body ending in XML, with XML after the `}`: scalac would
+            // read both as one literal.
+            "val a = xs.map { x =>\n  <a/>\n}\n\n<b/>\n",
+            "val a = xs.map { x => <a/> }\n<b/>\n",
         ] {
             assert_eq!(changed(same, fewer), None, "{same}");
         }
