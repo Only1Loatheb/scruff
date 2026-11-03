@@ -2,7 +2,8 @@
 name = "scuff"
 version = "0.1.0"
 edition = "2024"
-description = "formatter"
+description = "Scala code formatter"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

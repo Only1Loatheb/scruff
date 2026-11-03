@@ -75,10 +75,12 @@ jobs:
           mkdir "$name"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp target/${{ matrix.target }}/release/scuff.exe "$name/"
+            cp LICENSE "$name/"
             7z a "$name.zip" "$name"
             echo "ASSET=$name.zip" >> "$GITHUB_ENV"
           else
             cp target/${{ matrix.target }}/release/scuff "$name/"
+            cp LICENSE "$name/"
             tar czf "$name.tar.gz" "$name"
             echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
           fi
@@ -122,6 +124,7 @@ jobs:
             name=scuff-$target-$VERSION
             mkdir "$name"
             cp target/$target/release/scuff "$name/"
+            cp LICENSE "$name/"
             tar czf "$name.tar.gz" "$name"
           done
 
