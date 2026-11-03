@@ -1127,6 +1127,14 @@ impl<'t> Formatter<'t> {
             );
         }
 
+        // Named arguments and assignments, as `f(a = 1)` and sbt's
+        // `.settings(name := "x", deps += d)`, go one per line however
+        // short.
+        let one_per_line = node.kind() == SyntaxKind::Arguments
+            && items.iter().any(|item| match item.as_slice() {
+                [NodeOrToken::Node(n)] => is_named_argument(*n),
+                _ => false,
+            });
         let open = self.token_without_trailing(*open);
         let mut inner = vec![Doc::softline()];
         let mut commas = commas.into_iter();
@@ -1147,6 +1155,9 @@ impl<'t> Formatter<'t> {
         // unless there's only one item.
         if several {
             inner.push(Doc::if_break(Doc::text(","), Doc::Nil));
+        }
+        if one_per_line {
+            inner.push(Doc::break_parent());
         }
         let mut inner = Doc::concat(inner);
         for _ in 0..levels {
@@ -2411,6 +2422,25 @@ enum DefinitionBody<'t> {
     NextLine(SyntaxNode<'t>, isize),
 }
 
+/// Whether an argument is a named one, `a = 1`, or an assignment, as an
+/// sbt setting, `key := value` or `deps ++= Seq(...)`: an operator ending
+/// in `=` that isn't a comparison.
+fn is_named_argument(node: SyntaxNode<'_>) -> bool {
+    match node.kind() {
+        SyntaxKind::AssignmentExpression => true,
+        SyntaxKind::InfixExpression => node
+            .child_by_field_name("operator")
+            .is_some_and(|op| is_assignment_operator(op.text())),
+        _ => false,
+    }
+}
+
+/// An assignment operator, such as `+=` or `:=`, and not `==`, `<=`, `>=`
+/// or `!=`.
+fn is_assignment_operator(op: &str) -> bool {
+    op.ends_with('=') && !op.starts_with('=') && !matches!(op, "<=" | ">=" | "!=")
+}
+
 /// Whether a `;` follows the node.
 fn followed_by_semicolon(node: SyntaxNode<'_>) -> bool {
     node.last_token()
@@ -2610,7 +2640,7 @@ fn inside_parentheses(node: SyntaxNode<'_>) -> bool {
 /// How tightly an infix operator binds, lowest first (SLS 6.12.3).
 fn precedence(op: &str) -> u8 {
     // An assignment operator, such as `+=`, binds loosest.
-    if op.ends_with('=') && !op.starts_with('=') && !matches!(op, "<=" | ">=" | "!=") {
+    if is_assignment_operator(op) {
         return 0;
     }
     match op.chars().next() {

@@ -2,7 +2,9 @@
 # `Def.task { ... }`, goes on the `=`'s line if what's before its first
 # place to break, as `foo(`, fits there, however it's written, and
 # otherwise on the next line. One with a block of statements also starts
-# the next line past 30 columns from the line's indentation.
+# the next line past 30 columns from the line's indentation. Arguments
+# that are named, `a = 1`, or assignments, as sbt's `name := "x"`, go one
+# per line however short.
 
 <<< a call joins the `=`'s line where its head fits
 object A:
@@ -16,6 +18,48 @@ object A:
   val a = foo(x, y)
   val b = foo(x, y)
   def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] = foo(x, y)
+
+<<< named arguments go one per line, however short
+object A:
+  val a = foo(a = 1, b = 2)
+  val b =
+    foo(a = 1, b = 2)
+  val c = foo(
+    a = 1,
+    b = 2,
+  )
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] = foo(a = 1, b = 2)
+>>>
+object A:
+  val a = foo(
+    a = 1,
+    b = 2,
+  )
+  val b = foo(
+    a = 1,
+    b = 2,
+  )
+  val c = foo(
+    a = 1,
+    b = 2,
+  )
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] = foo(
+    a = 1,
+    b = 2,
+  )
+
+<<< so do assignments, as sbt's `:=`, `+=` and `++=`, but not comparisons
+object A:
+  val s = Seq(deps += d, srcs ++= ss, name := "x")
+  val c = f(x == 1, y <= 2, z != 3)
+>>>
+object A:
+  val s = Seq(
+    deps += d,
+    srcs ++= ss,
+    name := "x",
+  )
+  val c = f(x == 1, y <= 2, z != 3)
 
 <<< a call with a block of statements joins the `=`'s line within 30 columns
 object A:
@@ -137,7 +181,10 @@ lazy val docs = project
 >>>
 lazy val root = (project in file("."))
   .aggregate(core, cli)
-  .settings(name := "example", publish / skip := true)
+  .settings(
+    name := "example",
+    publish / skip := true,
+  )
 
 lazy val core = project
   .settings(
@@ -148,7 +195,11 @@ lazy val core = project
     ),
   )
 
-lazy val cli = project.dependsOn(core).settings(name := "example-cli")
+lazy val cli = project
+  .dependsOn(core)
+  .settings(
+    name := "example-cli"
+  )
 
 lazy val generate = taskKey[Seq[File]]("Generates sources")
 
@@ -161,4 +212,6 @@ lazy val generateSettings = Seq(
 )
 
 lazy val docs = project
-  .settings(name := "example-docs")
+  .settings(
+    name := "example-docs"
+  )
