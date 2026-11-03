@@ -83,11 +83,10 @@ object A:
         case _ => other
 >>>
 object A:
-  def f(c: Boolean) =
-    (if c then a
-     else b) match
-      case 1 => one
-      case _ => other
+  def f(c: Boolean) = (if c then a
+   else b) match
+    case 1 => one
+    case _ => other
 
 <<< cases written at the width of their match stay there
 object A:

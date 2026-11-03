@@ -1,0 +1,749 @@
+# A definition's body that is a control structure over several lines
+# starts the line after its `=`, a level deeper. A `match` stays on the
+# `=`'s line if it starts within 30 columns of the line's indentation and
+# its first line fits, however it's written, unless its cases sit at its
+# own width. Calls and selects, as `Def.task { ... }`, stay where they are.
+
+<<< match
+object A:
+  def short = x match
+    case 1 => a
+    case _ => b
+  def longWithALongerHeader(x: Any): Int = x match
+    case 1 => a
+    case _ => b
+  def next =
+    x match
+      case 1 => a
+      case _ => b
+>>>
+object A:
+  def short = x match
+    case 1 => a
+    case _ => b
+  def longWithALongerHeader(x: Any): Int =
+    x match
+      case 1 => a
+      case _ => b
+  def next = x match
+    case 1 => a
+    case _ => b
+
+<<< if
+object A:
+  def short = if c then
+    a()
+    b()
+  else
+    d()
+    e()
+  def longWithALongerHeader(x: Any): Int = if c then
+    a()
+    b()
+  else
+    d()
+    e()
+  def next =
+    if c then
+      a()
+      b()
+    else
+      d()
+      e()
+>>>
+object A:
+  def short =
+    if c then
+      a()
+      b()
+    else
+      d()
+      e()
+  def longWithALongerHeader(x: Any): Int =
+    if c then
+      a()
+      b()
+    else
+      d()
+      e()
+  def next =
+    if c then
+      a()
+      b()
+    else
+      d()
+      e()
+end A
+
+<<< try with catch and finally
+object A:
+  def short = try
+    a()
+    b()
+  catch
+    case e: IOException => c
+    case e: Exception   => d
+  finally e()
+  def longWithALongerHeader(x: Any): Int = try
+    a()
+    b()
+  catch
+    case e: IOException => c
+    case e: Exception   => d
+  finally e()
+  def next =
+    try
+      a()
+      b()
+    catch
+      case e: IOException => c
+      case e: Exception   => d
+    finally e()
+>>>
+object A:
+  def short =
+    try
+      a()
+      b()
+    catch
+      case e: IOException => c
+      case e: Exception   => d
+    finally e()
+  def longWithALongerHeader(x: Any): Int =
+    try
+      a()
+      b()
+    catch
+      case e: IOException => c
+      case e: Exception   => d
+    finally e()
+  def next =
+    try
+      a()
+      b()
+    catch
+      case e: IOException => c
+      case e: Exception   => d
+    finally e()
+end A
+
+<<< while
+object A:
+  def short = while c do
+    a()
+    b()
+  def longWithALongerHeader(x: Any): Int = while c do
+    a()
+    b()
+  def next =
+    while c do
+      a()
+      b()
+>>>
+object A:
+  def short =
+    while c do
+      a()
+      b()
+  def longWithALongerHeader(x: Any): Int =
+    while c do
+      a()
+      b()
+  def next =
+    while c do
+      a()
+      b()
+
+<<< for with yield
+object A:
+  def short = for x <- xs yield
+    val y = x
+    y
+  def longWithALongerHeader(x: Any): Int = for x <- xs yield
+    val y = x
+    y
+  def next =
+    for x <- xs yield
+      val y = x
+      y
+>>>
+object A:
+  def short =
+    for x <- xs yield
+      val y = x
+      y
+  def longWithALongerHeader(x: Any): Int =
+    for x <- xs yield
+      val y = x
+      y
+  def next =
+    for x <- xs yield
+      val y = x
+      y
+
+<<< for with do
+object A:
+  def short = for x <- xs do
+    f(x)
+    g(x)
+  def longWithALongerHeader(x: Any): Int = for x <- xs do
+    f(x)
+    g(x)
+  def next =
+    for x <- xs do
+      f(x)
+      g(x)
+>>>
+object A:
+  def short =
+    for x <- xs do
+      f(x)
+      g(x)
+  def longWithALongerHeader(x: Any): Int =
+    for x <- xs do
+      f(x)
+      g(x)
+  def next =
+    for x <- xs do
+      f(x)
+      g(x)
+
+<<< for with enumerators on their own lines
+object A:
+  def short = for
+    x <- xs
+    y <- ys
+  yield x + y
+  def longWithALongerHeader(x: Any): Int = for
+    x <- xs
+    y <- ys
+  yield x + y
+  def next =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+>>>
+object A:
+  def short =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+  def longWithALongerHeader(x: Any): Int =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+  def next =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+
+<<< Scala 2: match
+dialect = scala213
+===
+object A {
+  def short = x match {
+    case 1 => a
+    case _ => b
+  }
+  def longWithALongerHeader(x: Any): Int = x match {
+    case 1 => a
+    case _ => b
+  }
+  def next =
+    x match {
+      case 1 => a
+      case _ => b
+    }
+}
+>>>
+object A {
+  def short = x match {
+    case 1 => a
+    case _ => b
+  }
+  def longWithALongerHeader(x: Any): Int =
+    x match {
+      case 1 => a
+      case _ => b
+    }
+  def next = x match {
+    case 1 => a
+    case _ => b
+  }
+}
+
+<<< Scala 2: if
+dialect = scala213
+===
+object A {
+  def short = if (c) {
+    a()
+    b()
+  } else {
+    d()
+    e()
+  }
+  def longWithALongerHeader(x: Any): Int = if (c) {
+    a()
+    b()
+  } else {
+    d()
+    e()
+  }
+  def next =
+    if (c) {
+      a()
+      b()
+    } else {
+      d()
+      e()
+    }
+}
+>>>
+object A {
+  def short =
+    if (c) {
+      a()
+      b()
+    } else {
+      d()
+      e()
+    }
+  def longWithALongerHeader(x: Any): Int =
+    if (c) {
+      a()
+      b()
+    } else {
+      d()
+      e()
+    }
+  def next =
+    if (c) {
+      a()
+      b()
+    } else {
+      d()
+      e()
+    }
+}
+
+<<< Scala 2: try with catch and finally
+dialect = scala213
+===
+object A {
+  def short = try {
+    a()
+    b()
+  } catch {
+    case e: IOException => c
+    case e: Exception   => d
+  } finally e()
+  def longWithALongerHeader(x: Any): Int = try {
+    a()
+    b()
+  } catch {
+    case e: IOException => c
+    case e: Exception   => d
+  } finally e()
+  def next =
+    try {
+      a()
+      b()
+    } catch {
+      case e: IOException => c
+      case e: Exception   => d
+    } finally e()
+}
+>>>
+object A {
+  def short =
+    try {
+      a()
+      b()
+    } catch {
+      case e: IOException => c
+      case e: Exception   => d
+    } finally e()
+  def longWithALongerHeader(x: Any): Int =
+    try {
+      a()
+      b()
+    } catch {
+      case e: IOException => c
+      case e: Exception   => d
+    } finally e()
+  def next =
+    try {
+      a()
+      b()
+    } catch {
+      case e: IOException => c
+      case e: Exception   => d
+    } finally e()
+}
+
+<<< Scala 2: while
+dialect = scala213
+===
+object A {
+  def short = while (c) {
+    a()
+    b()
+  }
+  def longWithALongerHeader(x: Any): Int = while (c) {
+    a()
+    b()
+  }
+  def next =
+    while (c) {
+      a()
+      b()
+    }
+}
+>>>
+object A {
+  def short =
+    while (c) {
+      a()
+      b()
+    }
+  def longWithALongerHeader(x: Any): Int =
+    while (c) {
+      a()
+      b()
+    }
+  def next =
+    while (c) {
+      a()
+      b()
+    }
+}
+
+<<< Scala 2: do-while
+dialect = scala213
+===
+object A {
+  def short = do {
+    a()
+    b()
+  } while (c)
+  def longWithALongerHeader(x: Any): Int = do {
+    a()
+    b()
+  } while (c)
+  def next =
+    do {
+      a()
+      b()
+    } while (c)
+}
+>>>
+object A {
+  def short =
+    do {
+      a()
+      b()
+    } while (c)
+  def longWithALongerHeader(x: Any): Int =
+    do {
+      a()
+      b()
+    } while (c)
+  def next =
+    do {
+      a()
+      b()
+    } while (c)
+}
+
+<<< Scala 2: for with yield
+dialect = scala213
+===
+object A {
+  def short = for (x <- xs) yield {
+    val y = x
+    y
+  }
+  def longWithALongerHeader(x: Any): Int = for (x <- xs) yield {
+    val y = x
+    y
+  }
+  def next =
+    for (x <- xs) yield {
+      val y = x
+      y
+    }
+}
+>>>
+object A {
+  def short =
+    for (x <- xs) yield {
+      val y = x
+      y
+    }
+  def longWithALongerHeader(x: Any): Int =
+    for (x <- xs) yield {
+      val y = x
+      y
+    }
+  def next =
+    for (x <- xs) yield {
+      val y = x
+      y
+    }
+}
+
+<<< Scala 2: for with a body
+dialect = scala213
+===
+object A {
+  def short = for (x <- xs) {
+    f(x)
+    g(x)
+  }
+  def longWithALongerHeader(x: Any): Int = for (x <- xs) {
+    f(x)
+    g(x)
+  }
+  def next =
+    for (x <- xs) {
+      f(x)
+      g(x)
+    }
+}
+>>>
+object A {
+  def short =
+    for (x <- xs) {
+      f(x)
+      g(x)
+    }
+  def longWithALongerHeader(x: Any): Int =
+    for (x <- xs) {
+      f(x)
+      g(x)
+    }
+  def next =
+    for (x <- xs) {
+      f(x)
+      g(x)
+    }
+}
+
+<<< Scala 2: for with enumerators in braces
+dialect = scala213
+===
+object A {
+  def short = for {
+    x <- xs
+    y <- ys
+  } yield x + y
+  def longWithALongerHeader(x: Any): Int = for {
+    x <- xs
+    y <- ys
+  } yield x + y
+  def next =
+    for {
+      x <- xs
+      y <- ys
+    } yield x + y
+}
+>>>
+object A {
+  def short =
+    for {
+      x <- xs
+      y <- ys
+    } yield x + y
+  def longWithALongerHeader(x: Any): Int =
+    for {
+      x <- xs
+      y <- ys
+    } yield x + y
+  def next =
+    for {
+      x <- xs
+      y <- ys
+    } yield x + y
+}
+
+<<< a control structure after a long header starts the next line
+object A:
+  def discoverMainClasses(analysis: CompileAnalysis): Seq[String] = analysis match
+    case a: Analysis => a.mainClasses
+  private def definesMacro(analysis: CompileAnalysis): Boolean = if analysis.ok then
+    a()
+    b()
+  else c
+  def withCleanup(resource: Resource): Unit = try
+    a()
+    b()
+  finally c()
+  def collectEverything(xs: List[Int]): List[Int] = for x <- xs yield
+    val y = x + 1
+    y
+>>>
+object A:
+  def discoverMainClasses(analysis: CompileAnalysis): Seq[String] =
+    analysis match
+      case a: Analysis => a.mainClasses
+  private def definesMacro(analysis: CompileAnalysis): Boolean =
+    if analysis.ok then
+      a()
+      b()
+    else c
+  def withCleanup(resource: Resource): Unit =
+    try
+      a()
+      b()
+    finally c()
+  def collectEverything(xs: List[Int]): List[Int] =
+    for x <- xs yield
+      val y = x + 1
+      y
+
+<<< a match starting within 30 columns joins the `=`'s line, however it's written
+object A:
+  def f(x: Any): Int =
+    x match
+      case 1 => 2
+      case _ => 3
+  val cross =
+    id.crossVersionedValue match
+      case CrossValue.Full => full
+  def g(
+      x: Int
+  ): Int =
+    x match
+      case 1 => 2
+>>>
+object A:
+  def f(x: Any): Int = x match
+    case 1 => 2
+    case _ => 3
+  val cross = id.crossVersionedValue match
+    case CrossValue.Full => full
+  def g(x: Int): Int = x match
+    case 1 => 2
+
+<<< a `for` over several lines always starts the next line
+object A:
+  def f = for x <- xs yield
+    val y = x + 1
+    y
+  def g =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+  def h = for x <- xs yield x
+>>>
+object A:
+  def f =
+    for x <- xs yield
+      val y = x + 1
+      y
+  def g =
+    for
+      x <- xs
+      y <- ys
+    yield x + y
+  def h = for x <- xs yield x
+
+<<< a match with cases at its own width stays on the next line
+object A:
+  def k(x: Int) =
+    x match
+    case 1 => one
+>>>
+object A:
+  def k(x: Int) =
+    x match
+    case 1 => one
+
+<<< the 30 columns count from the line's indentation
+object A:
+  object B:
+    object C:
+      def lookup(key: Int): A = key match
+        case 1 => a
+>>>
+object A:
+  object B:
+    object C:
+      def lookup(key: Int): A = key match
+        case 1 => a
+
+<<< one whose first line wouldn't fit starts the next line
+maxColumn = 40
+===
+def f = someLongScrutinee.compute(alpha) match
+  case 1 => 2
+>>>
+def f =
+  someLongScrutinee.compute(alpha) match
+    case 1 => 2
+
+<<< calls, selects, blocks and one-line bodies stay on the `=`'s line
+object A:
+  def f(x: Any) = x match { case 1 => 2 }
+  val t = Def.task {
+    val y = 1
+    y
+  }
+  val ys = xs.map { x =>
+    val y = x + 1
+    y
+  }
+  val h = (x: Int) => {
+    a(x)
+    b(x)
+  }
+  def g = if c then a else b
+  def k = // the reason
+    x match
+      case _ => 1
+>>>
+object A:
+  def f(x: Any) = x match { case 1 => 2 }
+  val t = Def.task:
+    val y = 1
+    y
+  val ys = xs.map: x =>
+    val y = x + 1
+    y
+  val h = (x: Int) => {
+    a(x)
+    b(x)
+  }
+  def g = if c then a else b
+  def k = // the reason
+    x match
+      case _ => 1
+
+<<< Scala 2: a match in braces moves with its cases
+dialect = scala213
+===
+object A {
+  def discoverMainClasses(analysis: CompileAnalysis): Seq[String] = analysis match {
+    case 1 => 2
+  }
+  def f(x: Any) =
+    x match {
+      case 1 => 2
+    }
+}
+>>>
+object A {
+  def discoverMainClasses(analysis: CompileAnalysis): Seq[String] =
+    analysis match {
+      case 1 => 2
+    }
+  def f(x: Any) = x match {
+    case 1 => 2
+  }
+}

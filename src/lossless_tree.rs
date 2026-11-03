@@ -8,11 +8,11 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
-pub(crate) use equivalence::{
-    is_extends_separator, is_implicit_clause_keyword, is_type_wildcard_place,
-};
 pub use equivalence::{
     Difference, DifferenceKind, Location, check_equivalent, check_equivalent_trees,
+};
+pub(crate) use equivalence::{
+    is_extends_separator, is_implicit_clause_keyword, is_type_wildcard_place,
 };
 pub use indentation::RegionProblem;
 pub use syntax_kind::SyntaxKind;

@@ -608,11 +608,12 @@ fn is_lone_rename_braces(node: &SyntaxNode<'_>) -> bool {
     )
 }
 
-/// A lambda body, or an `if`'s `then` or `else` body, or a `try` or
-/// `finally` body, that is a block holding one expression means the same as
-/// the expression alone: `x =>` with `a + 1` on the next line is
-/// `x => a + 1`, and `if c then` with `a` on the next line is
-/// `if c then a`. tree-sitter-scala wraps only the first
+/// A lambda body, an `if`'s `then` or `else` body, a `try` or `finally`
+/// body, or a definition's body after `=`, that is a block holding one
+/// expression means the same as the expression alone: `x =>` with `a + 1`
+/// on the next line is `x => a + 1`, `if c then` with `a` on the next line
+/// is `if c then a`, and `def f =` with `a` on the next line is
+/// `def f = a`. tree-sitter-scala wraps only the first
 /// in a block, so the block is skipped, which lets a formatter move a body
 /// to its own line or back.
 fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
@@ -628,8 +629,17 @@ fn is_transparent_block(node: &SyntaxNode<'_>) -> bool {
         && node
             .parent()
             .is_some_and(|p| p.kind() == SyntaxKind::LambdaExpression || is_colon_lambda(&p));
+    let definition_body = node.parent().is_some_and(|p| {
+        matches!(
+            p.kind(),
+            SyntaxKind::FunctionDefinition
+                | SyntaxKind::GivenDefinition
+                | SyntaxKind::ValDefinition
+                | SyntaxKind::VarDefinition
+        )
+    });
     let block = matches!(node.kind(), SyntaxKind::IndentedBlock | SyntaxKind::Block);
-    if !(block && if_body) && !lambda_body {
+    if !(block && (if_body || definition_body)) && !lambda_body {
         return false;
     }
     // Its statements: not a block's braces.
@@ -1215,8 +1225,9 @@ mod tests {
             "val a = f(x => g(x))\n",
             "val a = f(x =>\n  g(x)\n  h(x)\n)\n",
         );
-        // Only a lambda body: a definition's block is still a block.
-        differs("def f = 1\n", "def f =\n  1\n");
+        // A definition's body on its own line is the expression too.
+        assert_eq!(check_equivalent("def f = 1\n", "def f =\n  1\n"), Ok(()));
+        differs("def f = 1\n", "def f =\n  1\n  2\n");
     }
 
     #[test]

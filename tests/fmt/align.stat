@@ -94,10 +94,9 @@ def f(x: Option[Int]) =
     case Some(value) => value
     case None => 0
 >>>
-def f(x: Option[Int]) =
-  x match
-    case Some(value) => value
-    case None        => 0
+def f(x: Option[Int]) = x match
+  case Some(value) => value
+  case None        => 0
 
 <<< a partial function in braces
 dialect = scala213

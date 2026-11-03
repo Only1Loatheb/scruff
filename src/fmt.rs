@@ -10,7 +10,7 @@ mod rewrite;
 mod spacing;
 
 use crate::config::Dialect;
-use crate::doc::{AlignPart, Doc, PrintOptions, print};
+use crate::doc::{AlignPart, Doc, PrintOptions, Shift, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
     SyntaxTrivia, TextRange, TextSize, Tree, TriviaKind, VerbatimRange, VerbatimReason,
@@ -96,6 +96,11 @@ struct Style {
     /// Line breaks, at least, in a statement that gets a Scala 3 end
     /// marker, as `end f` after a long `def f =`. See [`end_marker`].
     end_marker_min_breaks: usize,
+    /// Columns past its line's indentation, at most, where a definition's
+    /// `match` starts on the `=`'s line; past them it starts the next line.
+    /// Any other control structure always does. See
+    /// [`Formatter::definition_body`].
+    max_body_start: usize,
 }
 
 /// After Black, the Python formatter, which allows 2 blank lines between
@@ -111,6 +116,7 @@ const STYLE: Style = Style {
     max_blank_lines_in_templates: 2,
     max_blank_lines_in_blocks: 1,
     end_marker_min_breaks: 20,
+    max_body_start: 30,
 };
 
 fn format_with(
@@ -386,6 +392,15 @@ struct Formatter<'t> {
     leading_infix: bool,
     /// Whether boolean chains written over several lines are laid out.
     broken_chains: bool,
+    /// Definition bodies on their `=`'s line that may move to the next,
+    /// innermost last, until reached, with where their line goes and how
+    /// much deeper the line they were on is than the definition's: see
+    /// [`DefinitionBody::SameLine`].
+    moving: Vec<(SyntaxNode<'t>, isize, isize)>,
+    /// Definition bodies written on the line after their `=` that may join
+    /// it, innermost last, until reached: the one statement of the block,
+    /// where there is one, and the levels its lines come back by.
+    joined: Vec<(SyntaxNode<'t>, isize)>,
 }
 
 /// What comes just before a piece of trivia on its line.
@@ -445,6 +460,8 @@ impl<'t> Formatter<'t> {
             dropped_markers: Vec::new(),
             leading_infix: options.leading_infix,
             broken_chains: options.broken_chains,
+            moving: Vec::new(),
+            joined: Vec::new(),
         }
     }
 
@@ -459,6 +476,43 @@ impl<'t> Formatter<'t> {
     }
 
     fn node(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        // A definition's body that starts the line after its `=`.
+        // If it breaks, the lines inside it were placed from the line the
+        // body was on, so they move as far as its first line does.
+        if let Some(&(body, definition, deeper)) = self.moving.last()
+            && body == node
+        {
+            self.moving.pop();
+            self.skip_leading(&NodeOrToken::Node(node));
+            let body = self.node(node);
+            let broken = Shift {
+                levels: 1,
+                columns: -deeper,
+            };
+            return Doc::starts_past(
+                self.body_start_limit(node),
+                (Doc::hardline().offset(definition + deeper), broken),
+                (Doc::text(" "), Shift::default()),
+                body,
+            );
+        }
+        // A body written on the next line: joining the `=`'s line, the
+        // lines inside it, nested a level deeper than the definition in its
+        // block, come back a level.
+        if let Some(&(body, levels)) = self.joined.last()
+            && body == node
+        {
+            self.joined.pop();
+            let leading = self.leading_of(node);
+            let body = self.node(node);
+            let back = Shift { levels, columns: 0 };
+            return Doc::starts_past(
+                self.body_start_limit(node),
+                (leading, Shift::default()),
+                (Doc::text(" "), back),
+                body,
+            );
+        }
         if self.dropped_markers.last() == Some(&node) {
             self.dropped_markers.pop();
             return Doc::Nil;
@@ -656,6 +710,23 @@ impl<'t> Formatter<'t> {
     }
 
     fn node_body(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        if self.rules == Rules::Structural {
+            match self.definition_body(node) {
+                Some(DefinitionBody::SameLine {
+                    equals,
+                    body,
+                    definition,
+                    deeper,
+                }) => {
+                    self.trailing_skipped.push(equals.text_range().start());
+                    self.moving.push((body, definition, deeper));
+                }
+                Some(DefinitionBody::NextLine(statement, back)) => {
+                    self.joined.push((statement, back));
+                }
+                None => {}
+            }
+        }
         // A block the braced rule lays out is still a container, for the
         // lines inside it that the layout places.
         if self.rules == Rules::Structural
@@ -679,6 +750,178 @@ impl<'t> Formatter<'t> {
             return doc;
         }
         self.fallback(node)
+    }
+
+    /// Where a definition's body goes, if it's a control structure, as a
+    /// `match`, `if`, `try`, `for`, `while` or `do`-`while`, with
+    /// statements, enumerators or `case` clauses on lines of their own: on
+    /// the `=`'s line, unless it would start too far past the line's
+    /// indentation, or its first line wouldn't fit, or it isn't a `match`,
+    /// and then on the next line, a level deeper. The printer decides,
+    /// whichever line the body is written on. Not a call or a select, as
+    /// `Def.task { ... }`, nor a body with a comment before it or a `;`
+    /// after it, which tree-sitter-scala would take into the body on its
+    /// own line, nor where the layout doesn't place its lines.
+    fn definition_body(&self, node: SyntaxNode<'t>) -> Option<DefinitionBody<'t>> {
+        let field = match node.kind() {
+            SyntaxKind::FunctionDefinition | SyntaxKind::GivenDefinition => "body",
+            SyntaxKind::ValDefinition | SyntaxKind::VarDefinition => "value",
+            _ => return None,
+        };
+        let body = node.child_by_field_name(field)?.into_node()?;
+        // Written on the next line, the body is mostly a block of one
+        // statement, a level deeper; a `do`-`while` isn't.
+        let wrapped = body.kind() == SyntaxKind::IndentedBlock;
+        let control = if wrapped {
+            let mut statements = body
+                .non_trivia_children()
+                .filter(|c| c.kind() != SyntaxKind::EndMarker);
+            match (statements.next(), statements.next()) {
+                (Some(NodeOrToken::Node(only)), None) => only,
+                _ => return None,
+            }
+        } else {
+            body
+        };
+        if !matches!(
+            control.kind(),
+            SyntaxKind::MatchExpression
+                | SyntaxKind::IfExpression
+                | SyntaxKind::TryExpression
+                | SyntaxKind::ForExpression
+                | SyntaxKind::WhileExpression
+                | SyntaxKind::DoWhileExpression
+        ) {
+            return None;
+        }
+        let first = first_code_token(&NodeOrToken::Node(control))?;
+        let next_line = first.is_first_on_line();
+        let equals = std::iter::successors(first.prev_token(), SyntaxToken::prev_token)
+            .find(|t| !t.is_trivia())?;
+        let gap = TextRange::new(equals.text_range().end(), first.text_range().start());
+        // The definition's first line, which places it.
+        let start = first_code_token(&NodeOrToken::Node(node))?;
+        if equals.text() != "="
+            || equals.is_first_on_line()
+            || wrapped && !next_line
+            || !start.is_first_on_line()
+            || self.has_comment(gap)
+            || followed_by_semicolon(control)
+            || self.rule_between(&equals, &first) != Some(true)
+            || !self.has_statement_lines(control)
+        {
+            return None;
+        }
+        if next_line {
+            // Its lines are placed from the definition's, wherever it starts.
+            self.layout.offset(first.text_range().start())?;
+            // Joined, its lines at its own width, as `else` or `catch`, would
+            // end up at the definition's.
+            if !self.lines_deeper(control) {
+                return None;
+            }
+            let back = if wrapped { -1 } else { 0 };
+            return Some(DefinitionBody::NextLine(control, back));
+        }
+        // Where the body's line goes, past where the definition's lines are
+        // placed from: inside the definition's own frame, its first line.
+        let definition = if self.layout.frames_after_leading(node) {
+            0
+        } else {
+            self.layout.offset(start.text_range().start())?
+        };
+        // How much deeper than the definition's first line the line the
+        // body starts on is: the lines inside the body keep their place
+        // from it.
+        let line = self.placing_line(first)?;
+        self.layout.offset(line)?;
+        let deeper = self.indentation_at(line).len() as isize
+            - self.indentation_at(start.text_range().start()).len() as isize;
+        Some(DefinitionBody::SameLine {
+            equals,
+            body,
+            definition,
+            deeper,
+        })
+    }
+
+    /// Columns past its line's indentation, at most, where a definition's
+    /// control structure body starts on the `=`'s line: for a `match`;
+    /// the others always start the next line.
+    fn body_start_limit(&self, body: SyntaxNode<'t>) -> usize {
+        match body.kind() {
+            SyntaxKind::MatchExpression => self.style.max_body_start,
+            _ => 0,
+        }
+    }
+
+    /// Whether each line of `node` after its first starts deeper than the
+    /// first, or with a `}`, or is placed by the list rule, which puts a
+    /// list's lines from its `(`'s line and its `)` at that line's width.
+    fn lines_deeper(&self, node: SyntaxNode<'t>) -> bool {
+        let width = self.indentation_at(node.text_range().start()).len();
+        node.tokens()
+            .filter(|t| !t.is_trivia() && !t.is_missing() && t.is_first_on_line())
+            .skip(1)
+            .all(|t| {
+                let at = t.text_range().start();
+                t.text() == "}"
+                    || self.indentation_at(at).len() > width
+                    || t.parent_ancestors()
+                        .filter_map(|list| self.list_parts(list))
+                        .any(|parts| parts.open.text_range().start() < at)
+            })
+    }
+
+    /// The first token of the line that places `token`'s line: its own,
+    /// or for a line inside a list the list rule lays out, through its `)`
+    /// or `]`, the line of its `(` or `[`, which the list's lines follow.
+    fn placing_line(&self, token: SyntaxToken<'t>) -> Option<TextSize> {
+        let mut token = token;
+        loop {
+            let first = std::iter::successors(Some(token), SyntaxToken::prev_token)
+                .filter(|t| !t.is_trivia() && !t.is_missing())
+                .find(SyntaxToken::is_first_on_line)?;
+            let at = first.text_range().start();
+            let open = first
+                .parent_ancestors()
+                .filter_map(|list| self.list_parts(list))
+                .map(|parts| parts.open)
+                .find(|open| open.text_range().start() < at);
+            match open {
+                Some(open) => token = open,
+                None => return Some(at),
+            }
+        }
+    }
+
+    /// Whether `node` holds a block, region or `case` clauses that print
+    /// over several lines whatever the width: two statements or more, or
+    /// `case` clauses on lines of their own. A block of one statement may
+    /// join onto one line, or break to fit.
+    fn has_statement_lines(&self, node: SyntaxNode<'t>) -> bool {
+        self.has_line_break(node.text_range())
+            && node.descendants().any(|d| {
+                let statements = || d.non_trivia_children().filter(|c| c.kind().is_named());
+                let holds = match d.kind() {
+                    // Asked of the `match`, since its first `case` may
+                    // start the line after it.
+                    SyntaxKind::IndentedCases | SyntaxKind::CaseBlock => {
+                        return d.parent().is_some_and(|m| {
+                            m.kind() == SyntaxKind::MatchExpression
+                                && !self.prints_on_one_line(&NodeOrToken::Node(m))
+                        });
+                    }
+                    // Also a lambda's body in braces, which is no region.
+                    // And a `for`'s enumerators.
+                    SyntaxKind::Block
+                    | SyntaxKind::IndentedBlock
+                    | SyntaxKind::TemplateBody
+                    | SyntaxKind::Enumerators => statements().nth(1).is_some(),
+                    _ => d.is_indentation_region() && statements().nth(1).is_some(),
+                };
+                holds && !self.prints_on_one_line(&NodeOrToken::Node(d))
+            })
     }
 
     /// A container whose statements are placed from its frame: nested a
@@ -2103,6 +2346,35 @@ struct ListParts<'t> {
     items: Vec<Vec<SyntaxElement<'t>>>,
     /// The commas between the items, without a trailing one.
     commas: Vec<SyntaxToken<'t>>,
+}
+
+/// Where a definition's body is written, for
+/// [`Formatter::definition_body`].
+enum DefinitionBody<'t> {
+    /// On the `=`'s line.
+    SameLine {
+        equals: SyntaxToken<'t>,
+        body: SyntaxNode<'t>,
+        /// Where the body's line goes if it breaks, past where the
+        /// definition's lines are placed from, a level less.
+        definition: isize,
+        /// How much deeper than the definition's first line the line the
+        /// body starts on is.
+        deeper: isize,
+    },
+    /// On the next line: the body, the block's one statement where it's
+    /// wrapped in one, and the levels its lines come back by when it joins
+    /// the `=`'s line: one out of the block.
+    NextLine(SyntaxNode<'t>, isize),
+}
+
+/// Whether a `;` follows the node.
+fn followed_by_semicolon(node: SyntaxNode<'_>) -> bool {
+    node.last_token()
+        .and_then(|t| {
+            std::iter::successors(t.next_token(), SyntaxToken::next_token).find(|t| !t.is_trivia())
+        })
+        .is_some_and(|t| t.text() == ";")
 }
 
 /// Whether the node holds `case` clauses that may be aligned.

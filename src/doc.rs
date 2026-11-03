@@ -61,6 +61,20 @@ pub enum Doc<'a> {
     /// flat, so they break first. For type arguments in a result type, so a
     /// parameter list before them breaks instead.
     ReluctantGroup(Box<Doc<'a>>),
+    /// `flat` and then `body`, unless `body` would start more than `limit`
+    /// columns past its line's indentation, or its first line wouldn't fit:
+    /// then `broken` and `body`. Each way, the lines inside move by its
+    /// shift. For a definition's body, as `def f(x: A): B = x match`, which
+    /// starts the next line after a long header. The printer decides from
+    /// where it is, so the source's layout doesn't matter.
+    StartsPast {
+        limit: usize,
+        broken: Box<Doc<'a>>,
+        flat: Box<Doc<'a>>,
+        body: Box<Doc<'a>>,
+        broken_shift: Shift,
+        flat_shift: Shift,
+    },
     /// Prints `broken` if the enclosing group breaks, `flat` if not.
     IfBreak {
         broken: Box<Doc<'a>>,
@@ -90,6 +104,14 @@ pub enum Doc<'a> {
     /// line breaks: at its last block, which the marker closes as a `}`
     /// would, so `end if` doesn't follow a short `else`. Prints nothing.
     CountFrom,
+}
+
+/// How far the lines inside a [`Doc::StartsPast`] move: levels of
+/// indentation and columns, either negative.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Shift {
+    pub levels: isize,
+    pub columns: isize,
 }
 
 /// A part of [`Doc::Align`].
@@ -203,6 +225,23 @@ impl<'a> Doc<'a> {
         }
     }
 
+    /// See [`Doc::StartsPast`].
+    pub fn starts_past(
+        limit: usize,
+        (broken, broken_shift): (Doc<'a>, Shift),
+        (flat, flat_shift): (Doc<'a>, Shift),
+        body: Doc<'a>,
+    ) -> Doc<'a> {
+        Doc::StartsPast {
+            limit,
+            broken: Box::new(broken),
+            flat: Box::new(flat),
+            body: Box::new(body),
+            broken_shift,
+            flat_shift,
+        }
+    }
+
     pub fn line_suffix(self) -> Doc<'a> {
         Doc::LineSuffix(Box::new(self))
     }
@@ -255,6 +294,7 @@ impl<'a> Doc<'a> {
                 | Doc::ReluctantGroup(inner)
                 | Doc::EndMarker { body: inner, .. } => walk(inner, width),
                 Doc::IfBreak { flat, .. } => walk(flat, width),
+                Doc::StartsPast { flat, body, .. } => walk(flat, width) || walk(body, width),
                 Doc::Align(parts) => parts
                     .iter()
                     .any(|part| part.docs().iter().any(|doc| walk(doc, width))),
@@ -299,6 +339,9 @@ impl<'a> Doc<'a> {
             | Doc::ReluctantGroup(inner)
             | Doc::EndMarker { body: inner, .. } => inner.flat_width_counting(suffixes),
             Doc::IfBreak { flat, .. } => flat.flat_width_counting(suffixes),
+            Doc::StartsPast { flat, body, .. } => {
+                Some(flat.flat_width_counting(suffixes)? + body.flat_width_counting(suffixes)?)
+            }
             Doc::Align(parts) => parts
                 .iter()
                 .flat_map(AlignPart::docs)
@@ -580,6 +623,29 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
             Doc::IfBreak { broken, flat } => {
                 commands.push(part(if mode == Mode::Break { broken } else { flat }));
             }
+            Doc::StartsPast {
+                limit,
+                broken,
+                flat,
+                body,
+                broken_shift,
+                flat_shift,
+            } => {
+                let start = column + flat.flat_width().unwrap_or(0);
+                let past = start > width(line_indentation(&out)) + limit;
+                let room = options.max_width as isize - start as isize;
+                let (before, shift) = if past || !first_line_fits(body, room) {
+                    (broken, broken_shift)
+                } else {
+                    (flat, flat_shift)
+                };
+                let shifted = |doc| Command {
+                    offset: offset + shift.levels * indent_width as isize + shift.columns,
+                    ..part(doc)
+                };
+                commands.push(shifted(body));
+                commands.push(shifted(before));
+            }
             Doc::LineSuffix(inner) => suffixes.push(part(inner)),
             Doc::Align(parts) => {
                 let padding = align(parts, line_indent, indent_width, options.max_width);
@@ -774,6 +840,10 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
                 walk(inner, line_indent, indent_width, column);
             }
             Doc::IfBreak { broken, .. } => walk(broken, line_indent, indent_width, column),
+            Doc::StartsPast { flat, body, .. } => {
+                walk(flat, line_indent, indent_width, column);
+                walk(body, line_indent, indent_width, column);
+            }
             Doc::Align(parts) => {
                 for doc in parts.iter().flat_map(AlignPart::docs) {
                     walk(doc, line_indent, indent_width, column);
@@ -784,6 +854,52 @@ fn line_start_after(doc: &Doc<'_>, line_indent: usize, indent_width: usize) -> O
     let mut column = None;
     walk(doc, line_indent, indent_width, &mut column);
     column
+}
+
+/// Whether `doc`'s first line, through its first hard line break, fits in
+/// `room` columns with its groups flat: for a [`Doc::StartsPast`] body, which
+/// starts the next line sooner than break on its first.
+fn first_line_fits(doc: &Doc<'_>, room: isize) -> bool {
+    fn walk(doc: &Doc<'_>, room: &mut isize) -> Option<bool> {
+        let done = match doc {
+            Doc::Nil | Doc::LineSuffix(_) | Doc::BreakParent | Doc::CountFrom => None,
+            Doc::Text(text) => {
+                *room -= width(text) as isize;
+                None
+            }
+            Doc::Verbatim(text) | Doc::Relative { text, .. } => match text.find(['\n', '\r']) {
+                Some(i) => Some(*room >= width(&text[..i]) as isize),
+                None => {
+                    *room -= width(text) as isize;
+                    None
+                }
+            },
+            Doc::Line(LineKind::Hard) => Some(*room >= 0),
+            Doc::Line(LineKind::Line) => {
+                *room -= 1;
+                None
+            }
+            Doc::Line(LineKind::Soft) => None,
+            Doc::Concat(parts) => parts.iter().find_map(|part| walk(part, room)),
+            Doc::Nest(inner)
+            | Doc::Offset(_, inner)
+            | Doc::FromLineIndent(inner)
+            | Doc::Group(inner)
+            | Doc::ReluctantGroup(inner)
+            | Doc::EndMarker { body: inner, .. } => walk(inner, room),
+            Doc::IfBreak { flat, .. } => walk(flat, room),
+            Doc::StartsPast { flat, body, .. } => walk(flat, room).or_else(|| walk(body, room)),
+            Doc::Align(parts) => parts
+                .iter()
+                .flat_map(AlignPart::docs)
+                .find_map(|doc| walk(doc, room)),
+        };
+        match done {
+            None if *room < 0 => Some(false),
+            done => done,
+        }
+    }
+    walk(doc, &mut { room }).unwrap_or(room >= 0)
 }
 
 /// Whether `next`, printed in its mode, and then the rest of the current
@@ -839,6 +955,15 @@ fn fits(next: Command<'_, '_>, rest: &[Command<'_, '_>], mut room: isize) -> boo
             Doc::IfBreak { broken, flat } => {
                 let doc = if mode == Mode::Break { broken } else { flat };
                 stack.push((mode, Item::Doc(doc)));
+            }
+            // Measured as if it breaks where it may: what's before it
+            // doesn't count on the body sharing its line.
+            Doc::StartsPast {
+                broken, flat, body, ..
+            } => {
+                stack.push((mode, Item::Doc(body)));
+                let before = if mode == Mode::Break { broken } else { flat };
+                stack.push((mode, Item::Doc(before)));
             }
             Doc::Align(parts) => stack.extend(
                 parts
@@ -925,6 +1050,87 @@ mod tests {
         let doc = call("f", vec![t("a"), t("b")]).end_marker("end f", 3);
         assert_eq!(at(80, &doc), "f(a, b)");
         assert_eq!(at(6, &doc), "f(\n  a,\n  b\n)\nend f");
+    }
+
+    /// `head = x match` with a case below, the body on the next line if it
+    /// starts past 10 columns from its line's indentation.
+    fn match_after<'a>(head: &'a str, scrutinee: &'a str) -> Doc<'a> {
+        let body = t(scrutinee) + t(" match") + (Doc::hardline() + t("case _ => 1")).nest();
+        let down = Shift {
+            levels: 1,
+            columns: 0,
+        };
+        t(head)
+            + t(" =")
+            + Doc::starts_past(
+                10,
+                (Doc::hardline(), down),
+                (t(" "), Shift::default()),
+                body,
+            )
+    }
+
+    #[test]
+    fn starts_past_stays_on_the_line_within_its_limit() {
+        assert_eq!(
+            at(80, &match_after("val a", "x")),
+            "val a = x match
+  case _ => 1"
+        );
+    }
+
+    #[test]
+    fn starts_past_breaks_past_its_limit() {
+        assert_eq!(
+            at(80, &match_after("def longer", "x")),
+            "def longer =
+  x match
+    case _ => 1"
+        );
+    }
+
+    #[test]
+    fn starts_past_counts_from_the_line_indentation() {
+        let doc = t("object A:") + (Doc::hardline() + match_after("val a", "x")).nest();
+        assert_eq!(
+            at(80, &doc),
+            "object A:
+  val a = x match
+    case _ => 1"
+        );
+    }
+
+    #[test]
+    fn starts_past_breaks_when_its_first_line_would_not_fit() {
+        assert_eq!(
+            at(20, &match_after("val a", "scrutinee")),
+            "val a =
+  scrutinee match
+    case _ => 1"
+        );
+    }
+
+    #[test]
+    fn starts_past_shifts_the_lines_inside_the_way_it_goes() {
+        // Written a level deeper, as a body on its own line: joined, it
+        // comes back a level.
+        let body = (Doc::hardline() + t("case _ => 1")).nest().nest();
+        let back = Shift {
+            levels: -1,
+            columns: 0,
+        };
+        let doc = t("val a =")
+            + Doc::starts_past(
+                10,
+                (Doc::hardline(), Shift::default()),
+                (t(" "), back),
+                t("x match") + body,
+            );
+        assert_eq!(
+            at(80, &doc),
+            "val a = x match
+  case _ => 1"
+        );
     }
 
     #[test]

@@ -32,20 +32,18 @@ enum Color:
   case Red, Green
 
 object Main:
-  def show(c: Color): String =
-    c match
-      case Color.Red => "red"
-      case _         => "other"
+  def show(c: Color): String = c match
+    case Color.Red => "red"
+    case _         => "other"
   end show
 >>>
 enum Color:
   case Red, Green
 
 object Main:
-  def show(c: Color): String =
-    c match
-      case Color.Red => "red"
-      case _         => "other"
+  def show(c: Color): String = c match
+    case Color.Red => "red"
+    case _         => "other"
   end show
 
 <<< spacing within a line is normalized, indentation is kept
