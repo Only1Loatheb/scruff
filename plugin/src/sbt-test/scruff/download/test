@@ -1,0 +1,7 @@
+# scruffBinary isn't set, so scruffVersion's release is downloaded.
+> scruffFmt
+$ must-mirror src/main/scala/A.scala expected/A.scala
+
+# A version that isn't released fails.
+> set ThisBuild / scruffVersion := "9.9.9"
+-> scruffFmt

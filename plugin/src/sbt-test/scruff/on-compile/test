@@ -1,0 +1,39 @@
+# Compiling a project formats its sources, and no other project's.
+> resetRuns
+> sub1/compile
+> checkRuns 1 sub1/src/main
+$ must-mirror sub1/src/main/scala/S1.scala expected/S1.scala
+$ must-mirror sub2/src/main/scala/S2.scala unformatted-S2.txt
+$ must-mirror src/main/scala/A.scala unformatted-A.txt
+
+# The root aggregates sub1 to sub3. sub1 hasn't changed since it was
+# formatted, so scruff runs for the other three.
+> resetRuns
+> compile
+> checkRuns 3 src/main sub2/src/main sub3/src/main
+$ must-mirror src/main/scala/A.scala expected/A.scala
+$ must-mirror sub2/src/main/scala/S2.scala expected/S2.scala
+$ must-mirror sub3/src/main/scala/S3.scala expected/S3.scala
+$ must-mirror notes/N.scala unformatted-N.txt
+> Test/compile
+$ must-mirror src/test/scala/T.scala expected/T.scala
+
+# Nothing changed, so nothing is formatted, and formatting happened before
+# sbt read the sources, so nothing is compiled again.
+> recordClass
+$ sleep 1000
+> resetRuns
+> compile
+> checkRuns 0
+> checkNotRecompiled
+
+# Only the project whose source changed is formatted.
+$ copy-file unformatted-S2.txt sub2/src/main/scala/S2.scala
+> resetRuns
+> compile
+> checkRuns 1 sub2/src/main
+$ must-mirror sub2/src/main/scala/S2.scala expected/S2.scala
+
+# A project can turn it off.
+> off/compile
+$ must-mirror off/src/main/scala/C.scala unformatted-C.txt

@@ -1,0 +1,13 @@
+# The check fails on unformatted files and leaves them as they are.
+-> scruffFmtCheck
+$ must-mirror src/main/scala/A.scala unformatted-A.txt
+
+> scruffFmt
+$ must-mirror src/main/scala/A.scala expected/A.scala
+$ must-mirror sub/src/main/scala/B.scala expected/B.scala
+> scruffFmtCheck
+
+# Formatting writes files, so it must run again, not come from the cache.
+$ copy-file unformatted-A.txt src/main/scala/A.scala
+> scruffFmt
+$ must-mirror src/main/scala/A.scala expected/A.scala
