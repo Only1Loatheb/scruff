@@ -1315,10 +1315,14 @@ impl<'t> Formatter<'t> {
     /// with the head: `sys.env` in `sys.env.get(k).map(f)`. A colon argument
     /// with more of the chain after it always breaks it, so what follows
     /// lines up with its call: `.map: x =>`, the body, then `.filter(p)`.
+    /// When that's the chain's one call, it stays on the head's line, with
+    /// its body two levels in and the rest one: `Def.task:`, the body, then
+    /// `.taskValue`.
     fn select_chain(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
         let ChainParts {
             first_line,
             segments,
+            colon_call,
             broken,
         } = self.chain_parts(node)?;
         let leading = self.leading_of(node);
@@ -1339,6 +1343,13 @@ impl<'t> Formatter<'t> {
         {
             frames.extend(self.layout.frames_at(n));
             current = spine;
+        }
+        // A colon call on the head's line nests its body one level deeper
+        // than the parts after it, so they don't continue its last line.
+        if let Some(dot) = colon_call.first() {
+            self.skip_leading(dot);
+            let call = Doc::concat(colon_call.into_iter().map(|e| self.element(e)));
+            line.push(call.nest().from_line_indent());
         }
         let mut rest = Vec::new();
         for segment in segments {
@@ -1414,12 +1425,29 @@ impl<'t> Formatter<'t> {
         if calls < 2 && !colon_before_last {
             return None;
         }
+        // With one call, taking a colon argument, the call stays on the
+        // head's line, as one call does outside a chain. Not with a lambda:
+        // its body is placed from its own line, so that call breaks.
+        let colon_on_head = calls < 2
+            && segments[first_call].0.iter().any(|e| {
+                e.kind() == SyntaxKind::ColonArgument
+                    && e.as_node().is_some_and(|argument| {
+                        argument
+                            .non_trivia_children()
+                            .all(|c| c.field_name() != Some("lambda_start"))
+                    })
+            });
         let mut first_line = vec![head];
         first_line.extend(pending.into_iter().rev());
         let mut segments = segments.into_iter().map(|(segment, _)| segment);
         for segment in segments.by_ref().take(first_call) {
             first_line.extend(segment);
         }
+        let colon_call = if colon_on_head {
+            segments.next()?
+        } else {
+            Vec::new()
+        };
         let segments: Vec<_> = segments.collect();
 
         // A colon argument, with its `:`, before the last part.
@@ -1430,9 +1458,12 @@ impl<'t> Formatter<'t> {
                         .is_some_and(|p| p.kind() == SyntaxKind::CallExpression)
         };
         let (last, before_last) = segments.split_last()?;
+        let before_last: Vec<_> = colon_call
+            .iter()
+            .chain(before_last.iter().flatten())
+            .collect();
         let broken = before_last
             .iter()
-            .flatten()
             .any(|e| e.kind() == SyntaxKind::ColonArgument);
         // Its body must be placed, or its lines would keep their widths
         // while the chain moves.
@@ -1452,9 +1483,8 @@ impl<'t> Formatter<'t> {
         if broken
             && !before_last
                 .iter()
-                .flatten()
                 .filter(|e| e.kind() == SyntaxKind::ColonArgument)
-                .all(placed)
+                .all(|e| placed(e))
         {
             return None;
         }
@@ -1465,7 +1495,11 @@ impl<'t> Formatter<'t> {
         // Each part prints on one line, and the source breaks lines only
         // before a `.`, in a gap the spacing rules decide, so the chain
         // printed flat matches the fallback.
-        let elements: Vec<_> = first_line.iter().chain(segments.iter().flatten()).collect();
+        let elements: Vec<_> = first_line
+            .iter()
+            .chain(&colon_call)
+            .chain(segments.iter().flatten())
+            .collect();
         if !elements
             .iter()
             .all(|e| allowed(e) || self.prints_on_one_line(e))
@@ -1490,6 +1524,7 @@ impl<'t> Formatter<'t> {
         Some(ChainParts {
             first_line,
             segments,
+            colon_call,
             broken,
         })
     }
@@ -2387,6 +2422,9 @@ struct ChainParts<'t> {
     first_line: Vec<SyntaxElement<'t>>,
     /// The rest, from the first call's `.` on: each starts with its `.`.
     segments: Vec<Vec<SyntaxElement<'t>>>,
+    /// The chain's one call when it takes a colon argument, which stays on
+    /// the head's line: `Def.task:` in `Def.task: body .taskValue`.
+    colon_call: Vec<SyntaxElement<'t>>,
     /// Whether the chain always breaks: a colon argument comes before its
     /// last part.
     broken: bool,

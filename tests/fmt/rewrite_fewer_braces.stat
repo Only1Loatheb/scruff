@@ -76,8 +76,7 @@ val a = xs
   .map: x =>
     x + 1
   .sum
-val b = xs
-  .foreach:
+val b = xs.foreach:
     println(x)
   .size
 

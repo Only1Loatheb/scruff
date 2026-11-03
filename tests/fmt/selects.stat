@@ -156,3 +156,36 @@ val x = f(
 )
 >>>
 val x = f(xs.map(g).filter(h), y)
+
+<<< a chain's one call with a colon argument stays with the head
+Test / resourceGenerators += Def
+  .task:
+    Seq(resource)
+  .taskValue
+val a = Def.task:
+  Seq(resource)
+.taskValue
+val b = xs.collect:
+  case Some(x) => x
+.toList.size
+>>>
+Test / resourceGenerators += Def.task:
+    Seq(resource)
+  .taskValue
+val a = Def.task:
+    Seq(resource)
+  .taskValue
+val b = xs.collect:
+    case Some(x) => x
+  .toList
+  .size
+
+<<< unless it's a lambda: then the chain breaks before its call
+val a = xs.foreach: x =>
+  println(x)
+.size
+>>>
+val a = xs
+  .foreach: x =>
+    println(x)
+  .size
