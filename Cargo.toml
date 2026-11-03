@@ -19,7 +19,8 @@ tree-sitter-scala = "0.26.4"
 strip = true
 lto = true
 
-[dev-dependencies]
+# pprof only builds on Unix; `examples/profile.rs` is a stub elsewhere.
+[target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.15.0", features = ["flamegraph"] }
 
 # Release with symbols, for `examples/profile.rs`.
