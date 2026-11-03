@@ -167,13 +167,12 @@ def test() =
       val x = env
       println(x)
 >>>
-def test() =
-  fn2(
-    arg = "blue sleeps faster than tuesday",
-    arg2 = "the quick brown fox jumped over the lazy dog",
-  ): env =>
-    val x = env
-    println(x)
+def test() = fn2(
+  arg = "blue sleeps faster than tuesday",
+  arg2 = "the quick brown fox jumped over the lazy dog",
+): env =>
+  val x = env
+  println(x)
 
 <<< an item over several lines keeps the list as written
 dialect = scala213
@@ -193,7 +192,8 @@ val x = f(a,
 <<< a list with a comment stays as written
 val x = compute(alpha, /* b */ beta, gamma)
 >>>
-val x = compute(alpha, /* b */ beta, gamma)
+val x =
+  compute(alpha, /* b */ beta, gamma)
 
 <<< a trailing comma in the source doesn't matter
 val x = compute(
@@ -322,7 +322,8 @@ dialect = scala213
 val ys = xs.map { case (k, v) => k + v + other }
 val y = g { compute(alpha, beta, gamma, delta1) }
 >>>
-val ys = xs.map { case (k, v) => k + v + other }
+val ys =
+  xs.map { case (k, v) => k + v + other }
 val y = g {
   compute(alpha, beta, gamma, delta1)
 }

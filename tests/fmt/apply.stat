@@ -1,0 +1,164 @@
+# A definition's body that is an apply, a call such as `foo(x, y)` or
+# `Def.task { ... }`, goes on the `=`'s line if what's before its first
+# place to break, as `foo(`, fits there, however it's written, and
+# otherwise on the next line. One with a block of statements also starts
+# the next line past 30 columns from the line's indentation.
+
+<<< a call joins the `=`'s line where its head fits
+object A:
+  val a = foo(x, y)
+  val b =
+    foo(x, y)
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] =
+    foo(x, y)
+>>>
+object A:
+  val a = foo(x, y)
+  val b = foo(x, y)
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] = foo(x, y)
+
+<<< a call with a block of statements joins the `=`'s line within 30 columns
+object A:
+  val c = Def.task {
+    val y = 1
+    y
+  }
+  val d =
+    Def.task {
+      val y = 1
+      y
+    }
+>>>
+object A:
+  val c = Def.task:
+    val y = 1
+    y
+  val d = Def.task:
+    val y = 1
+    y
+
+<<< a call with a block starting past 30 columns starts the next line
+object A:
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] = Def.task {
+    val y = 1
+    y
+  }
+>>>
+object A:
+  def someVeryLongDefinitionName(parameter: Int): Initialize[Task[Unit]] =
+    Def.task:
+      val y = 1
+      y
+
+<<< arguments that don't fit break inside the list
+object A:
+  def e(parameter: Int): Seq[Setting[?]] = Seq(alphaSetting := 1, betaSetting := 2, gammaSetting := 3)
+>>>
+object A:
+  def e(parameter: Int): Seq[Setting[?]] = Seq(
+    alphaSetting := 1,
+    betaSetting := 2,
+    gammaSetting := 3,
+  )
+
+<<< a lambda argument stays on the `=`'s line
+object A:
+  val ys = xs.map { x =>
+    val y = x + 1
+    y
+  }
+>>>
+object A:
+  val ys = xs.map: x =>
+    val y = x + 1
+    y
+
+<<< Scala 2: a call with a block joins the `=`'s line within 30 columns
+dialect = scala213
+===
+object A {
+  val c = Def.task {
+    val y = 1
+    y
+  }
+  val d =
+    Def.task {
+      val y = 1
+      y
+    }
+}
+>>>
+object A {
+  val c = Def.task {
+    val y = 1
+    y
+  }
+  val d = Def.task {
+    val y = 1
+    y
+  }
+}
+
+<<< a build.sbt
+lazy val root = (project in file("."))
+  .aggregate(core, cli)
+  .settings(
+    name := "example",
+    publish / skip := true,
+  )
+
+lazy val core = project
+  .settings(
+    name := "example-core",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % "2.12.0",
+      "org.scalameta" %% "munit" % "1.0.2" % Test,
+    ),
+  )
+
+lazy val cli = project
+  .dependsOn(core)
+  .settings(
+    name := "example-cli",
+  )
+
+lazy val generate = taskKey[Seq[File]]("Generates sources")
+
+lazy val generateSettings = Seq(
+  generate := {
+    val out = (Compile / sourceManaged).value / "Generated.scala"
+    IO.write(out, "object Generated")
+    Seq(out)
+  },
+)
+
+lazy val docs = project
+  .settings(name := "example-docs")
+>>>
+lazy val root = (project in file("."))
+  .aggregate(core, cli)
+  .settings(name := "example", publish / skip := true)
+
+lazy val core = project
+  .settings(
+    name := "example-core",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %% "cats-core" % "2.12.0",
+      "org.scalameta" %% "munit" % "1.0.2" % Test,
+    ),
+  )
+
+lazy val cli = project.dependsOn(core).settings(name := "example-cli")
+
+lazy val generate = taskKey[Seq[File]]("Generates sources")
+
+lazy val generateSettings = Seq(
+  generate := {
+    val out = (Compile / sourceManaged).value / "Generated.scala"
+    IO.write(out, "object Generated")
+    Seq(out)
+  },
+)
+
+lazy val docs = project
+  .settings(name := "example-docs")

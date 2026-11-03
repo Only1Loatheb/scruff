@@ -62,8 +62,8 @@ pub enum Doc<'a> {
     /// parameter list before them breaks instead.
     ReluctantGroup(Box<Doc<'a>>),
     /// `flat` and then `body`, unless `body` would start more than `limit`
-    /// columns past its line's indentation, or its first line wouldn't fit:
-    /// then `broken` and `body`. Each way, the lines inside move by its
+    /// columns past its line's indentation, or its first line, as
+    /// `first_line` measures it, wouldn't fit: then `broken` and `body`. Each way, the lines inside move by its
     /// shift. For a definition's body, as `def f(x: A): B = x match`, which
     /// starts the next line after a long header. The printer decides from
     /// where it is, so the source's layout doesn't matter.
@@ -74,6 +74,7 @@ pub enum Doc<'a> {
         body: Box<Doc<'a>>,
         broken_shift: Shift,
         flat_shift: Shift,
+        first_line: FirstLine,
     },
     /// Prints `broken` if the enclosing group breaks, `flat` if not.
     IfBreak {
@@ -104,6 +105,18 @@ pub enum Doc<'a> {
     /// line breaks: at its last block, which the marker closes as a `}`
     /// would, so `end if` doesn't follow a short `else`. Prints nothing.
     CountFrom,
+}
+
+/// What of a [`Doc::StartsPast`] body must fit on its line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstLine {
+    /// Its first line, through its first hard line break, with its groups
+    /// flat: a `match` starts the next line sooner than break its
+    /// scrutinee.
+    Flat,
+    /// What's before its first place to break, as `f(`: a call breaks its
+    /// arguments sooner than start the next line.
+    ToBreak,
 }
 
 /// How far the lines inside a [`Doc::StartsPast`] move: levels of
@@ -231,6 +244,7 @@ impl<'a> Doc<'a> {
         (broken, broken_shift): (Doc<'a>, Shift),
         (flat, flat_shift): (Doc<'a>, Shift),
         body: Doc<'a>,
+        first_line: FirstLine,
     ) -> Doc<'a> {
         Doc::StartsPast {
             limit,
@@ -239,6 +253,7 @@ impl<'a> Doc<'a> {
             body: Box::new(body),
             broken_shift,
             flat_shift,
+            first_line,
         }
     }
 
@@ -630,11 +645,22 @@ pub fn print(doc: &Doc<'_>, options: &PrintOptions) -> String {
                 body,
                 broken_shift,
                 flat_shift,
+                first_line,
             } => {
                 let start = column + flat.flat_width().unwrap_or(0);
-                let past = start > width(line_indentation(&out)) + limit;
+                let past = start > width(line_indentation(&out)).saturating_add(*limit);
                 let room = options.max_width as isize - start as isize;
-                let (before, shift) = if past || !first_line_fits(body, room) {
+                let fits = match first_line {
+                    FirstLine::Flat => first_line_fits(body, room),
+                    FirstLine::ToBreak => {
+                        let head = Command {
+                            mode: Mode::Break,
+                            ..part(body)
+                        };
+                        fits(head, &commands, room)
+                    }
+                };
+                let (before, shift) = if past || !fits {
                     (broken, broken_shift)
                 } else {
                     (flat, flat_shift)
@@ -1067,6 +1093,7 @@ mod tests {
                 (Doc::hardline(), down),
                 (t(" "), Shift::default()),
                 body,
+                FirstLine::Flat,
             )
     }
 
@@ -1125,12 +1152,35 @@ mod tests {
                 (Doc::hardline(), Shift::default()),
                 (t(" "), back),
                 t("x match") + body,
+                FirstLine::Flat,
             );
         assert_eq!(
             at(80, &doc),
             "val a = x match
   case _ => 1"
         );
+    }
+
+    #[test]
+    fn starts_past_to_a_break_breaks_the_call_sooner_than_the_line() {
+        let args = (Doc::softline() + t("alpha, beta")).nest() + Doc::softline();
+        let call = (t("f(") + args + t(")")).group();
+        let doc = t("val a =")
+            + Doc::starts_past(
+                usize::MAX,
+                (
+                    Doc::hardline(),
+                    Shift {
+                        levels: 1,
+                        columns: 0,
+                    },
+                ),
+                (t(" "), Shift::default()),
+                call,
+                FirstLine::ToBreak,
+            );
+        assert_eq!(at(20, &doc), "val a = f(\n  alpha, beta\n)");
+        assert_eq!(at(80, &doc), "val a = f(alpha, beta)");
     }
 
     #[test]

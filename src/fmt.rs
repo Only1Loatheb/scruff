@@ -10,7 +10,7 @@ mod rewrite;
 mod spacing;
 
 use crate::config::Dialect;
-use crate::doc::{AlignPart, Doc, PrintOptions, Shift, print};
+use crate::doc::{AlignPart, Doc, FirstLine, PrintOptions, Shift, print};
 use crate::lossless_tree::{
     Difference, NodeOrToken, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken,
     SyntaxTrivia, TextRange, TextSize, Tree, TriviaKind, VerbatimRange, VerbatimReason,
@@ -484,16 +484,18 @@ impl<'t> Formatter<'t> {
         {
             self.moving.pop();
             self.skip_leading(&NodeOrToken::Node(node));
+            let (limit, first_line) = self.body_start(node);
             let body = self.node(node);
             let broken = Shift {
                 levels: 1,
                 columns: -deeper,
             };
             return Doc::starts_past(
-                self.body_start_limit(node),
+                limit,
                 (Doc::hardline().offset(definition + deeper), broken),
                 (Doc::text(" "), Shift::default()),
                 body,
+                first_line,
             );
         }
         // A body written on the next line: joining the `=`'s line, the
@@ -503,14 +505,16 @@ impl<'t> Formatter<'t> {
             && body == node
         {
             self.joined.pop();
+            let (limit, first_line) = self.body_start(node);
             let leading = self.leading_of(node);
             let body = self.node(node);
             let back = Shift { levels, columns: 0 };
             return Doc::starts_past(
-                self.body_start_limit(node),
+                limit,
                 (leading, Shift::default()),
                 (Doc::text(" "), back),
                 body,
+                first_line,
             );
         }
         if self.dropped_markers.last() == Some(&node) {
@@ -752,14 +756,15 @@ impl<'t> Formatter<'t> {
         self.fallback(node)
     }
 
-    /// Where a definition's body goes, if it's a control structure, as a
-    /// `match`, `if`, `try`, `for`, `while` or `do`-`while`, with
-    /// statements, enumerators or `case` clauses on lines of their own: on
-    /// the `=`'s line, unless it would start too far past the line's
-    /// indentation, or its first line wouldn't fit, or it isn't a `match`,
-    /// and then on the next line, a level deeper. The printer decides,
-    /// whichever line the body is written on. Not a call or a select, as
-    /// `Def.task { ... }`, nor a body with a comment before it or a `;`
+    /// Where a definition's body goes, if it's a call, as `f(x)` or
+    /// `Def.task { ... }`, or a control structure, as a `match`, `if`,
+    /// `try`, `for`, `while` or `do`-`while`, with statements, enumerators
+    /// or `case` clauses on lines of their own: on the `=`'s line, unless it
+    /// would start too far past the line's indentation, or what must fit
+    /// there wouldn't, or it's a control structure other than a `match`,
+    /// and then on the next line, a level deeper. See
+    /// [`Formatter::body_start`]. The printer decides, whichever line the
+    /// body is written on. Not a body with a comment before it or a `;`
     /// after it, which tree-sitter-scala would take into the body on its
     /// own line, nor where the layout doesn't place its lines.
     fn definition_body(&self, node: SyntaxNode<'t>) -> Option<DefinitionBody<'t>> {
@@ -791,6 +796,7 @@ impl<'t> Formatter<'t> {
                 | SyntaxKind::ForExpression
                 | SyntaxKind::WhileExpression
                 | SyntaxKind::DoWhileExpression
+                | SyntaxKind::CallExpression
         ) {
             return None;
         }
@@ -808,7 +814,7 @@ impl<'t> Formatter<'t> {
             || self.has_comment(gap)
             || followed_by_semicolon(control)
             || self.rule_between(&equals, &first) != Some(true)
-            || !self.has_statement_lines(control)
+            || control.kind() != SyntaxKind::CallExpression && !self.has_statement_lines(control)
         {
             return None;
         }
@@ -837,6 +843,16 @@ impl<'t> Formatter<'t> {
         self.layout.offset(line)?;
         let deeper = self.indentation_at(line).len() as isize
             - self.indentation_at(start.text_range().start()).len() as isize;
+        // From a line deeper than the definition's, lines inside the body
+        // written shallower than it would move past the definition.
+        if deeper != 0 && !self.lines_deeper(body) {
+            return None;
+        }
+        // tree-sitter-scala takes a statement after a comment on its line,
+        // as `/* final */ def g`, into a body on a line of its own.
+        if self.next_line_starts_with_comment(node) {
+            return None;
+        }
         Some(DefinitionBody::SameLine {
             equals,
             body,
@@ -846,18 +862,25 @@ impl<'t> Formatter<'t> {
     }
 
     /// Columns past its line's indentation, at most, where a definition's
-    /// control structure body starts on the `=`'s line: for a `match`;
-    /// the others always start the next line.
-    fn body_start_limit(&self, body: SyntaxNode<'t>) -> usize {
+    /// body starts on the `=`'s line, and what of it must fit there: for a
+    /// `match`, its first line; for a call, its head, as `f(`, with no
+    /// limit for one on one line. Other control structures always start the
+    /// next line.
+    fn body_start(&self, body: SyntaxNode<'t>) -> (usize, FirstLine) {
         match body.kind() {
-            SyntaxKind::MatchExpression => self.style.max_body_start,
-            _ => 0,
+            SyntaxKind::MatchExpression => (self.style.max_body_start, FirstLine::Flat),
+            SyntaxKind::CallExpression if self.has_statement_lines(body) => {
+                (self.style.max_body_start, FirstLine::ToBreak)
+            }
+            SyntaxKind::CallExpression => (usize::MAX, FirstLine::ToBreak),
+            _ => (0, FirstLine::Flat),
         }
     }
 
     /// Whether each line of `node` after its first starts deeper than the
-    /// first, or with a `}`, or is placed by the list rule, which puts a
-    /// list's lines from its `(`'s line and its `)` at that line's width.
+    /// first, or with a `}`, or is placed by a rule: the list rule, which
+    /// puts a list's lines from its `(`'s line and its `)` at that line's
+    /// width, or the rules for select and boolean chains.
     fn lines_deeper(&self, node: SyntaxNode<'t>) -> bool {
         let width = self.indentation_at(node.text_range().start()).len();
         node.tokens()
@@ -870,7 +893,27 @@ impl<'t> Formatter<'t> {
                     || t.parent_ancestors()
                         .filter_map(|list| self.list_parts(list))
                         .any(|parts| parts.open.text_range().start() < at)
+                    || t.parent_ancestors().any(|chain| {
+                        chain.text_range().start() < at
+                            && (self.chain_parts(chain).is_some()
+                                || self.infix_parts(chain).is_some())
+                    })
             })
+    }
+
+    /// Whether the code after `node` is on a later line, after a comment
+    /// on that line, as `/* final */ def g`.
+    fn next_line_starts_with_comment(&self, node: SyntaxNode<'t>) -> bool {
+        let Some(last) = node.last_code_token() else {
+            return false;
+        };
+        let next = std::iter::successors(last.next_token(), SyntaxToken::next_token)
+            .find(|t| !t.is_trivia() && !t.is_missing());
+        next.is_some_and(|next| {
+            let (end, at) = (last.text_range().end(), next.text_range().start());
+            let before = &self.text[self.line_start(at)..usize::from(at)];
+            self.has_line_break(TextRange::new(end, at)) && !before.trim().is_empty()
+        })
     }
 
     /// The first token of the line that places `token`'s line: its own,

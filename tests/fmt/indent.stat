@@ -22,8 +22,7 @@ object A:
           g(1)
 >>>
 object A:
-  def f =
-    g(1)
+  def f = g(1)
 
 <<< continuation lines keep their shape
 dialect = scala213
@@ -204,11 +203,10 @@ def f =
         y * 2
   }
 >>>
-def f =
-  run(alpha, beta).map { x =>
-    val y = x + 1
-    y * 2
-  }
+def f = run(alpha, beta).map { x =>
+  val y = x + 1
+  y * 2
+}
 
 <<< a body after a broken condition is placed from the condition's line
 dialect = scala213
