@@ -180,12 +180,20 @@ val b = xs.collect:
   .toList
   .size
 
-<<< unless it's a lambda: then the chain breaks before its call
+<<< a lambda's parameters stay with it
 val a = xs.foreach: x =>
   println(x)
 .size
+val b = xs
+  .foreach: (x, y) =>
+    val z = x
+    z
+  .size
 >>>
-val a = xs
-  .foreach: x =>
+val a = xs.foreach: x =>
     println(x)
+  .size
+val b = xs.foreach: (x, y) =>
+    val z = x
+    z
   .size

@@ -359,6 +359,9 @@ struct Formatter<'t> {
     /// Where the token starts whose leading line break may be a space: a
     /// body joining its keyword's line.
     joining: Option<TextSize>,
+    /// A node whose frame its rule places instead: a lambda's colon
+    /// argument in a chain, nested deeper than its own line.
+    unframed: Option<SyntaxNode<'t>>,
     /// Where the tokens start whose trailing gap a rule prints itself, such
     /// as the line break before a `}`. Nested rules can each add one.
     trailing_skipped: Vec<TextSize>,
@@ -442,6 +445,7 @@ impl<'t> Formatter<'t> {
             copied_until: TextSize::from(0),
             leading_done: None,
             joining: None,
+            unframed: None,
             trailing_skipped: Vec::new(),
             layout,
             at_file_start: true,
@@ -611,7 +615,7 @@ impl<'t> Formatter<'t> {
 
     fn node_framed(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
         // A frame places the lines inside it from the line it starts on.
-        if self.layout.frames_after_leading(node) {
+        if self.layout.frames_after_leading(node) && self.unframed != Some(node) {
             let leading = self.leading_of(node);
             leading + self.node_body(node).from_line_indent()
         } else {
@@ -1346,9 +1350,15 @@ impl<'t> Formatter<'t> {
         }
         // A colon call on the head's line nests its body one level deeper
         // than the parts after it, so they don't continue its last line.
+        // A lambda's argument would place its body from its own line.
         if let Some(dot) = colon_call.first() {
             self.skip_leading(dot);
+            self.unframed = colon_call
+                .iter()
+                .find(|e| e.kind() == SyntaxKind::ColonArgument)
+                .and_then(|e| e.as_node().copied());
             let call = Doc::concat(colon_call.into_iter().map(|e| self.element(e)));
+            self.unframed = None;
             line.push(call.nest().from_line_indent());
         }
         let mut rest = Vec::new();
@@ -1425,25 +1435,15 @@ impl<'t> Formatter<'t> {
         if calls < 2 && !colon_before_last {
             return None;
         }
-        // With one call, taking a colon argument, the call stays on the
-        // head's line, as one call does outside a chain. Not with a lambda:
-        // its body is placed from its own line, so that call breaks.
-        let colon_on_head = calls < 2
-            && segments[first_call].0.iter().any(|e| {
-                e.kind() == SyntaxKind::ColonArgument
-                    && e.as_node().is_some_and(|argument| {
-                        argument
-                            .non_trivia_children()
-                            .all(|c| c.field_name() != Some("lambda_start"))
-                    })
-            });
         let mut first_line = vec![head];
         first_line.extend(pending.into_iter().rev());
         let mut segments = segments.into_iter().map(|(segment, _)| segment);
         for segment in segments.by_ref().take(first_call) {
             first_line.extend(segment);
         }
-        let colon_call = if colon_on_head {
+        // With one call, taking a colon argument, the call stays on the
+        // head's line, as one call does outside a chain.
+        let colon_call = if calls < 2 {
             segments.next()?
         } else {
             Vec::new()
