@@ -238,6 +238,16 @@ fn repository(name: &str, files: &[(&str, &str)]) -> PathBuf {
     dir
 }
 
+/// `text` with Windows' `\\` path separators as `/`, for comparing paths
+/// scuff prints on any platform.
+fn paths(text: String) -> String {
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
+}
+
 fn read(dir: &Path, path: &str) -> String {
     std::fs::read_to_string(dir.join(path)).unwrap()
 }
@@ -258,7 +268,7 @@ fn a_directory_stands_for_its_scala_files() {
     let out = scuff_in(&dir, &["format", "--check", "."], "");
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
-        text(&out.stderr),
+        paths(text(&out.stderr)),
         "./build.sbt: would be reformatted\n./src/main/scala/A.scala: would be reformatted\n"
     );
     let out = scuff_in(&dir, &["format", "src"], "");
@@ -285,7 +295,7 @@ fn a_walk_follows_the_config_and_skips_excluded_directories() {
     );
     let out = scuff_in(&dir, &["format", "--check", "."], "");
     assert_eq!(
-        text(&out.stderr),
+        paths(text(&out.stderr)),
         "./A.scala: would be reformatted\n./notes.txt: would be reformatted\n"
     );
 }
@@ -298,7 +308,10 @@ fn a_file_named_twice_is_formatted_once() {
         &["format", "--check", "src", "src/A.scala", "./src"],
         "",
     );
-    assert_eq!(text(&out.stderr), "src/A.scala: would be reformatted\n");
+    assert_eq!(
+        paths(text(&out.stderr)),
+        "src/A.scala: would be reformatted\n"
+    );
 }
 
 #[test]
