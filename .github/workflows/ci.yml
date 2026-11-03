@@ -1,0 +1,152 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      # Keep LF endings so the .stat fixtures match on Windows.
+      - run: git config --global core.autocrlf false
+      # Submodules (modules/) are skipped: tests that use them skip when absent.
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `name` follows sbtn's naming (x86_64-pc-linux etc.).
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: x86_64-pc-linux }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: aarch64-pc-linux }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: x86_64-pc-win32 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Static Linux binaries: musl-gcc compiles tree-sitter's C sources.
+      - if: endsWith(matrix.target, '-musl')
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: musl-tools # provides musl-gcc
+          version: 1.0
+      - if: endsWith(matrix.target, '-musl')
+        run: |
+          target=${{ matrix.target }}
+          echo "CC_${target//-/_}=musl-gcc" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Tag builds use the tag (v0.1.0 -> 0.1.0); others use the short commit.
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          name=scuff-${{ matrix.name }}-$VERSION
+          mkdir "$name"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/scuff.exe "$name/"
+            7z a "$name.zip" "$name"
+            echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+          else
+            cp target/${{ matrix.target }}/release/scuff "$name/"
+            tar czf "$name.tar.gz" "$name"
+            echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scuff-${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  build-macos:
+    name: Build (macOS)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      # Both targets are built on the ARM runner; x86_64 is cross-compiled.
+      - run: cargo build --release --locked --target aarch64-apple-darwin --target x86_64-apple-darwin
+      # Tag builds use the tag (v0.1.0 -> 0.1.0); others use the short commit.
+      - name: Version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Package
+        run: |
+          mkdir -p target/universal-apple-darwin/release
+          lipo -create -output target/universal-apple-darwin/release/scuff \
+            target/aarch64-apple-darwin/release/scuff \
+            target/x86_64-apple-darwin/release/scuff
+          lipo -info target/universal-apple-darwin/release/scuff
+          for target in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+            name=scuff-$target-$VERSION
+            mkdir "$name"
+            cp target/$target/release/scuff "$name/"
+            tar czf "$name.tar.gz" "$name"
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: scuff-macos
+          path: scuff-*-apple-darwin-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [build, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          generate_release_notes: true
