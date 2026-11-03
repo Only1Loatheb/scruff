@@ -83,6 +83,13 @@ fn format_reads_standard_input_and_prints() {
 }
 
 #[test]
+fn fmt_is_an_alias_for_format() {
+    let out = scuff(&["fmt"], UNFORMATTED);
+    assert!(out.status.success());
+    assert_eq!(text(&out.stdout), FORMATTED);
+}
+
+#[test]
 fn check_passes_quietly_on_a_formatted_file() {
     let path = file("check_formatted.scala", FORMATTED);
     let out = scuff(&["format", "--check", path.to_str().unwrap()], "");

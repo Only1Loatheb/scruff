@@ -32,6 +32,7 @@ enum Command {
     /// Exits with 1 if `--check` finds a file would change, and with 2 if
     /// one can't be formatted: it can't be read or written, has syntax
     /// errors, or formatting would change what the code means.
+    #[command(visible_alias = "fmt")]
     Format {
         /// The files and directories to format, each file overwritten with
         /// the result; reads standard input and prints the result when
@@ -44,6 +45,7 @@ enum Command {
         check: bool,
     },
     /// Parse a Scala file and print its concrete syntax tree
+    #[command(hide = true)]
     Parse {
         /// The file to parse; reads standard input when omitted or `-`
         file: Option<PathBuf>,
@@ -53,6 +55,7 @@ enum Command {
         quiet: bool,
     },
     /// List each comment and the token it's attached to
+    #[command(hide = true)]
     Comments {
         /// The file to read; reads standard input when omitted or `-`
         file: Option<PathBuf>,
