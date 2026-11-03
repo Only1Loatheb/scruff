@@ -2,7 +2,7 @@
 
 ## Scruff formatter
 
-Scruff is a fast and normalizing Scala code formatter.
+Scruff is a fast and normalizing Scala code formatter, written in Rust.
 Inspired by Python's code formatters like [Black](https://pypi.org/project/black/) and [Ruff](https://docs.astral.sh/ruff/formatter/),
 Scruff removes all configurations related to styling.
 
