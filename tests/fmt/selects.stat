@@ -124,13 +124,15 @@ dialect = scala213
 ===
 val ys = xs
   .map { x =>
-    x + 1
+    val y = x + 1
+    y * 2
   }
   .filter(g)
 >>>
 val ys = xs
   .map { x =>
-    x + 1
+    val y = x + 1
+    y * 2
   }
   .filter(g)
 

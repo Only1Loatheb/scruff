@@ -61,14 +61,16 @@ dialect = scala213
 object A {
   val ys = xs
     .map { x =>
-          x + 1
+          val y = x + 1
+          y * 2
     }
 }
 >>>
 object A {
   val ys = xs
     .map { x =>
-      x + 1
+      val y = x + 1
+      y * 2
     }
 }
 
@@ -199,12 +201,14 @@ def f =
     alpha,
     beta
   ).map { x =>
-        x + 1
+        val y = x + 1
+        y * 2
   }
 >>>
 def f =
   run(alpha, beta).map { x =>
-    x + 1
+    val y = x + 1
+    y * 2
   }
 
 <<< a body after a broken condition is placed from the condition's line

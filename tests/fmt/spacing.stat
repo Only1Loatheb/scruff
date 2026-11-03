@@ -642,9 +642,7 @@ val y = f(xs.map { x =>
 }*)
 >>>
 val x = f(a ++ b*)
-val y = f(xs.map { x =>
-  x
-}*)
+val y = f(xs.map { x => x }*)
 
 <<< a spaced vararg wildcard hugs its star
 dialect = scala213

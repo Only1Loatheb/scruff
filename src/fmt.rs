@@ -264,6 +264,16 @@ fn relaid(tree: &Tree, rules: Rules, style: Style, broken_chains: bool) -> inden
                 .extend(first_code_token(&NodeOrToken::Node(chain)).and_then(line_first));
             relaid.joined.extend(line_first(close));
         }
+        if let Some(parts) = formatter.braced_parts(node) {
+            let body = parts
+                .lambda
+                .as_ref()
+                .map_or(&parts.inner, |(_, _, body)| body);
+            relaid
+                .joined
+                .extend(first_code_token(body).and_then(line_first));
+            relaid.joined.extend(line_first(parts.close));
+        }
     }
     relaid.joined.sort();
     relaid.joined.dedup();
@@ -646,6 +656,14 @@ impl<'t> Formatter<'t> {
     }
 
     fn node_body(&mut self, node: SyntaxNode<'t>) -> Doc<'t> {
+        // A block the braced rule lays out is still a container, for the
+        // lines inside it that the layout places.
+        if self.rules == Rules::Structural
+            && node.kind() == SyntaxKind::Block
+            && let Some(doc) = self.braced(node)
+        {
+            return doc;
+        }
         if let Some(nested) = self.layout.container(node) {
             return self.container(node, nested);
         }
@@ -772,7 +790,6 @@ impl<'t> Formatter<'t> {
             SyntaxKind::TypeParameters => self.list(node, 2),
             SyntaxKind::InfixExpression => self.infix(node),
             SyntaxKind::ParenthesizedExpression => self.chain_parens(node),
-            SyntaxKind::Block => self.braced(node),
             SyntaxKind::CallExpression
             | SyntaxKind::FieldExpression
             | SyntaxKind::GenericFunction => self.select_chain(node),
@@ -867,8 +884,52 @@ impl<'t> Formatter<'t> {
     /// `xs.map { x => f(x) }`: on one line if it fits, otherwise the
     /// expression goes on the next line indented 2 spaces and `}` on its own
     /// line, as in sbt's code. A lambda keeps `{ x =>` on the first line.
+    /// An argument is laid out from its parts, however it was written.
     fn braced(&mut self, node: SyntaxNode<'t>) -> Option<Doc<'t>> {
-        if !self.can_break(node) {
+        let BracedParts {
+            open,
+            inner,
+            close,
+            last,
+            lambda,
+        } = self.braced_parts(node)?;
+        let leading = self.leading_of(node);
+        let open = self.token_without_trailing(open);
+        let mut docs = Vec::new();
+        let body = match lambda {
+            Some((head, arrow, body)) => {
+                docs.push(Doc::text(" "));
+                self.skip_leading(&head[0]);
+                docs.extend(head.into_iter().map(|e| self.element(e)));
+                docs.push(self.token_without_trailing(arrow));
+                body
+            }
+            None => inner,
+        };
+        self.trailing_skipped.push(last.text_range().start());
+        self.skip_leading(&body);
+        let body = (Doc::line() + self.element(body)).nest();
+        self.skip_leading(&NodeOrToken::Token(close));
+        let close_text = self.token_without_trailing(close);
+        let close_trailing = self.trailing(close);
+        Some(
+            leading
+                + open
+                + (Doc::concat(docs) + body + Doc::line() + close_text)
+                    .group()
+                    .from_line_indent()
+                + close_trailing,
+        )
+    }
+
+    /// The parts of a block the [`Self::braced`] rule lays out, or `None` if
+    /// it keeps the block as written: it holds a definition or more than one
+    /// expression, is written over several lines and isn't an argument, has
+    /// comments inside, a part that doesn't print on one line, or a gap
+    /// inside the braces where the spacing rules don't decide
+    /// the space, so the block printed flat wouldn't match the fallback.
+    fn braced_parts(&self, node: SyntaxNode<'t>) -> Option<BracedParts<'t>> {
+        if node.kind() != SyntaxKind::Block || !self.can_relayout(node) {
             return None;
         }
         let children: Vec<_> = node.non_trivia_children().collect();
@@ -877,8 +938,14 @@ impl<'t> Formatter<'t> {
             return None;
         };
         let name = inner.kind().name();
+        // Written over several lines, only an argument, as `g {` or
+        // `xs.map { x =>`, is laid out: a body, as a `def`'s or an `if`'s,
+        // keeps its breaks. And a `{` starting a line stays there: joined to
+        // the line before, it can make the block an argument of what's on it.
+        let broken = self.has_line_break(node.text_range());
         if open.text() != "{"
             || close.text() != "}"
+            || broken && (open.is_first_on_line() || node.field_name() != Some("arguments"))
             || name.ends_with("_definition")
             || name.ends_with("_declaration")
         {
@@ -897,32 +964,51 @@ impl<'t> Formatter<'t> {
         }
         let lambda = match inner {
             NodeOrToken::Node(n) if n.kind() == SyntaxKind::LambdaExpression => {
-                Some(self.lambda_parts(*n)?)
+                let (head, arrow, body) = self.lambda_parts(*n)?;
+                // A head on the line after `{` stays there: the fewer braces
+                // rewrite leaves such a lambda alone, but not once joined.
+                if first_code_token(&head[0])?.is_first_on_line() {
+                    return None;
+                }
+                // Not statements after the arrow, as `a(); b`, which
+                // tree-sitter-scala reads differently on one line, nor a
+                // definition or an import alone.
+                let only = match body {
+                    NodeOrToken::Node(n) if n.kind() == SyntaxKind::IndentedBlock => {
+                        let mut statements = n.non_trivia_children();
+                        match (statements.next(), statements.next()) {
+                            (Some(only), None) => only,
+                            _ => return None,
+                        }
+                    }
+                    _ => body,
+                };
+                let name = only.kind().name();
+                if name.ends_with("_definition") || name.ends_with("_declaration") {
+                    return None;
+                }
+                // The head and its arrow on one line, as the rule prints them.
+                let mut line = head.clone();
+                line.push(NodeOrToken::Token(arrow));
+                if !self.items_on_one_line(&line) || !self.prints_on_one_line(&body) {
+                    return None;
+                }
+                Some((head, arrow, body))
             }
-            _ => None,
-        };
-
-        let open = self.token_without_trailing(*open);
-        let mut docs = Vec::new();
-        let body = match lambda {
-            Some((head, arrow, body)) => {
-                docs.push(Doc::text(" "));
-                docs.extend(head.into_iter().map(|e| self.element(e)));
-                docs.push(self.token_without_trailing(arrow));
-                body
+            _ => {
+                if !self.prints_on_one_line(inner) {
+                    return None;
+                }
+                None
             }
-            None => *inner,
         };
-        self.trailing_skipped.push(last.text_range().start());
-        let body = (Doc::line() + self.element(body)).nest();
-        let close_text = self.token_without_trailing(*close);
-        let close_trailing = self.trailing(*close);
-        Some(
-            open + (Doc::concat(docs) + body + Doc::line() + close_text)
-                .group()
-                .from_line_indent()
-                + close_trailing,
-        )
+        Some(BracedParts {
+            open: *open,
+            inner: *inner,
+            close: *close,
+            last,
+            lambda,
+        })
     }
 
     /// A select chain with at least two calls, such as `xs.map(f).filter(g)`:
@@ -1399,7 +1485,8 @@ impl<'t> Formatter<'t> {
             && (self.list_parts(*node).is_some()
                 || self.chain_parts(*node).is_some()
                 || self.infix_parts(*node).is_some()
-                || self.chain_parens_parts(*node).is_some())
+                || self.chain_parens_parts(*node).is_some()
+                || self.braced_parts(*node).is_some())
             || self.items_on_one_line(&node.non_trivia_children().collect::<Vec<_>>());
         self.one_line.borrow_mut().insert(*node, one_line);
         one_line
@@ -1411,6 +1498,13 @@ impl<'t> Formatter<'t> {
         // Between tokens: a node's range can take in trivia after its last
         // token, as `enumerators` does the line break before `yield`.
         elements.windows(2).all(|pair| {
+            // A body that joins its keyword's line if it fits.
+            if pair[1]
+                .as_node()
+                .is_some_and(|n| self.joinable_body(*n).is_some())
+            {
+                return true;
+            }
             let (Some(left), Some(right)) = (last_code_token(&pair[0]), first_code_token(&pair[1]))
             else {
                 return false;
@@ -1418,12 +1512,6 @@ impl<'t> Formatter<'t> {
             let gap = TextRange::new(left.text_range().end(), right.text_range().start());
             !self.text[gap].contains(['\n', '\r'])
         }) && elements.iter().all(|e| self.prints_on_one_line(e))
-    }
-
-    /// Whether a rule may add line breaks inside `node`: it prints on one
-    /// line and [`Self::can_relayout`] allows it.
-    fn can_break(&self, node: SyntaxNode<'t>) -> bool {
-        self.prints_on_one_line(&NodeOrToken::Node(node)) && self.can_relayout(node)
     }
 
     /// Whether a rule may decide where `node` has line breaks: it has no
@@ -1917,6 +2005,18 @@ impl<'t> Formatter<'t> {
             _ => Doc::text(text),
         }
     }
+}
+
+/// A block of one expression split for [`Formatter::braced`].
+struct BracedParts<'t> {
+    open: SyntaxToken<'t>,
+    inner: SyntaxElement<'t>,
+    close: SyntaxToken<'t>,
+    /// The last token before `}`.
+    last: SyntaxToken<'t>,
+    /// The expression split at its arrow, when it's a lambda.
+    #[allow(clippy::type_complexity)]
+    lambda: Option<(Vec<SyntaxElement<'t>>, SyntaxToken<'t>, SyntaxElement<'t>)>,
 }
 
 /// A boolean chain split for [`Formatter::infix`].

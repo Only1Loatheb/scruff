@@ -122,12 +122,14 @@ class EvalSuite:
 <<< braces stay before other code
 val a = xs.map { x => x + 1 } ++ ys
 val b = xs.map { x =>
-  x + 1
+  val y = x + 1
+  y * 2
 } ++ ys
 >>>
 val a = xs.map { x => x + 1 } ++ ys
 val b = xs.map { x =>
-  x + 1
+  val y = x + 1
+  y * 2
 } ++ ys
 
 <<< Scala 2 gets braces back
@@ -148,9 +150,7 @@ val a = xs.map { x =>
 fn2(
   arg = "blue sleeps faster than tuesday",
   arg2 = "the quick brown fox jumped over the lazy dog",
-) { env =>
-  println(env)
-}
+) { env => println(env) }
 
 <<< Scala 2 gets braces back before a selection or a closing parenthesis
 dialect = scala213
@@ -162,9 +162,5 @@ f(xs.map: x =>
   x + 1
 )
 >>>
-val b = xs.map { x =>
-  x + 1
-}.filter(p)
-f(xs.map { x =>
-  x + 1
-})
+val b = xs.map { x => x + 1 }.filter(p)
+f(xs.map { x => x + 1 })

@@ -181,11 +181,13 @@ dialect = scala213
 val x = f(a,
   g {
     b
+    c
   })
 >>>
 val x = f(a,
   g {
     b
+    c
   })
 
 <<< a list with a comment stays as written
@@ -334,6 +336,72 @@ val ys = xs.flatMap { x => ys.map { y => combine(x, y) } }
 val a = reify { reify { x } }
 val ys = xs.flatMap { x =>
   ys.map { y => combine(x, y) }
+}
+
+<<< a block argument over several lines is laid out from its parts
+dialect = scala213
+===
+val y = g {
+  f(x)
+}
+val zs = xs.map { x =>
+  f(x)
+}
+val ws = xs.map { x => compute(alpha, beta) }
+val vs = xs.flatMap { x =>
+  ys.map { y =>
+    combine(x, y)
+  }
+}
+>>>
+val y = g { f(x) }
+val zs = xs.map { x => f(x) }
+val ws = xs.map { x =>
+  compute(alpha, beta)
+}
+val vs = xs.flatMap { x =>
+  ys.map { y => combine(x, y) }
+}
+
+<<< other blocks over several lines keep their breaks
+dialect = scala213
+===
+def f = {
+  g(1)
+}
+val a = if (c) {
+  b
+} else {
+  d
+}
+val ys = xs.map {
+  x => f(x)
+}
+val zs = xs.map { x =>
+  val y = f(x)
+  y
+}
+val ws = xs.map { x =>
+  import y._
+}
+>>>
+def f = {
+  g(1)
+}
+val a = if (c) {
+  b
+} else {
+  d
+}
+val ys = xs.map {
+  x => f(x)
+}
+val zs = xs.map { x =>
+  val y = f(x)
+  y
+}
+val ws = xs.map { x =>
+  import y._
 }
 
 <<< type parameters that don't fit, when the value parameters fit
