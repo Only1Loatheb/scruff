@@ -49,12 +49,26 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// The files `--check` says would change, from its standard output, in
+/// order, with `/` as the path separator.
+fn reformatted(out: &Output) -> Vec<String> {
+    paths(text(&out.stdout))
+        .lines()
+        .filter_map(|line| line.strip_suffix(": would be reformatted"))
+        .map(|place| {
+            // Drop the line and column.
+            let mut parts = place.rsplitn(3, ':');
+            parts.nth(2).unwrap_or(place).to_string()
+        })
+        .collect()
+}
+
 #[test]
 fn format_overwrites_a_file() {
     let path = file("format_overwrites.scala", UNFORMATTED);
     let out = scuff(&["format", path.to_str().unwrap()], "");
     assert!(out.status.success());
-    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stdout), "1 file reformatted\n");
     assert_eq!(text(&out.stderr), "");
     // Exactly the formatted text: no extra line break at the end.
     assert_eq!(std::fs::read_to_string(&path).unwrap(), FORMATTED);
@@ -73,7 +87,7 @@ fn format_leaves_a_formatted_file_unwritten() {
 
 #[test]
 fn format_reads_standard_input_and_prints() {
-    let out = scuff(&["format"], UNFORMATTED);
+    let out = scuff(&["format", "-"], UNFORMATTED);
     assert!(out.status.success());
     // Exactly the formatted text: no extra line break at the end.
     assert_eq!(text(&out.stdout), FORMATTED);
@@ -84,31 +98,140 @@ fn format_reads_standard_input_and_prints() {
 
 #[test]
 fn fmt_is_an_alias_for_format() {
-    let out = scuff(&["fmt"], UNFORMATTED);
+    let out = scuff(&["fmt", "-"], UNFORMATTED);
     assert!(out.status.success());
     assert_eq!(text(&out.stdout), FORMATTED);
 }
 
 #[test]
-fn check_passes_quietly_on_a_formatted_file() {
+fn check_passes_on_a_formatted_file() {
     let path = file("check_formatted.scala", FORMATTED);
     let out = scuff(&["format", "--check", path.to_str().unwrap()], "");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stdout), "1 file already formatted\n");
     assert_eq!(text(&out.stderr), "");
 }
 
 #[test]
-fn check_names_a_file_that_would_change() {
+fn check_shows_how_a_file_would_change() {
     let path = file("check_unformatted.scala", UNFORMATTED);
     let out = scuff(&["format", "--check", path.to_str().unwrap()], "");
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(text(&out.stdout), "");
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "{}:2:11: would be reformatted\n  |\n1 | object A:\n  -   def f(x:Int)=x+1\n2 +   def f(x: Int) = x + 1\n  |\n\n1 file would be reformatted\n",
+            path.display()
+        )
+    );
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), UNFORMATTED);
+}
+
+#[test]
+fn diff_prints_a_unified_diff_and_writes_nothing() {
+    let dir = project("diff");
+    std::fs::write(dir.join("A.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("B.scala"), FORMATTED).unwrap();
+    let out = scuff_in(&dir, &["format", "--diff", "A.scala", "B.scala"], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stdout),
+        "--- A.scala\n+++ A.scala\n@@ -1,2 +1,2 @@\n object A:\n-  def f(x:Int)=x+1\n+  def f(x: Int) = x + 1\n\n"
+    );
+    // The count goes to standard error, so the diff can be piped.
     assert_eq!(
         text(&out.stderr),
-        format!("{}: would be reformatted\n", path.display())
+        "1 file would be reformatted, 1 file already formatted\n"
     );
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), UNFORMATTED);
+    assert_eq!(read(&dir, "A.scala"), UNFORMATTED);
+    // Nothing to change: no diff, and exit with 0.
+    let out = scuff_in(&dir, &["format", "--diff", "B.scala"], "");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "");
+    // From standard input too.
+    let out = scuff_in(&dir, &["format", "--diff", "-"], UNFORMATTED);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stdout).starts_with("--- <stdin>\n"));
+}
+
+#[test]
+fn the_count_says_what_changed() {
+    let dir = project("count");
+    std::fs::write(dir.join("A.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("B.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("C.scala"), FORMATTED).unwrap();
+    let out = scuff_in(&dir, &["format", "--check", "."], "");
+    assert!(
+        text(&out.stdout).ends_with("\n2 files would be reformatted, 1 file already formatted\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    let out = scuff_in(&dir, &["format", "."], "");
+    assert_eq!(
+        text(&out.stdout),
+        "2 files reformatted, 1 file left unchanged\n"
+    );
+    let out = scuff_in(&dir, &["format", "."], "");
+    assert_eq!(text(&out.stdout), "3 files left unchanged\n");
+}
+
+#[test]
+fn without_files_it_formats_the_current_directory() {
+    let dir = repository("no_files", &[("src/A.scala", UNFORMATTED)]);
+    let out = scuff_in(&dir, &["format"], "");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "1 file reformatted\n");
+    assert_eq!(read(&dir, "src/A.scala"), FORMATTED);
+    // A directory with nothing to format says so, and isn't an error.
+    let empty = project("no_files_empty");
+    let out = scuff_in(&empty, &["format"], "");
+    assert!(out.status.success());
+    assert_eq!(
+        text(&out.stderr),
+        "warning: no files to format under the given paths\n"
+    );
+}
+
+#[test]
+fn quiet_leaves_out_the_count_and_silent_everything() {
+    let dir = project("quiet");
+    std::fs::write(dir.join("A.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("B.scala"), "object B {\n  def f( = 1\n").unwrap();
+    let out = scuff_in(&dir, &["format", "--check", "-q", "."], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(reformatted(&out), ["A.scala"]);
+    assert!(!text(&out.stdout).contains("1 file"));
+    // Errors are part of `--check`'s report, so they still show.
+    assert!(text(&out.stderr).starts_with("B.scala:2:"));
+    // As in Ruff, they don't otherwise: only the exit code tells.
+    let out = scuff_in(&dir, &["format", "--diff", "-q", "."], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(text(&out.stdout).starts_with("--- A.scala\n"));
+    assert_eq!(text(&out.stderr), "");
+    let out = scuff_in(&dir, &["format", "--check", "-q", "-"], "object B {\n");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stderr), "");
+    let empty = project("quiet_empty");
+    let out = scuff_in(&empty, &["format", "-q"], "");
+    assert!(out.status.success());
+    assert_eq!(text(&out.stderr), "");
+    let out = scuff_in(&dir, &["format", "--check", "-s", "."], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), "");
+    // A diff is the output asked for, so it shows even when silent.
+    let out = scuff_in(&dir, &["format", "--diff", "-s", "A.scala"], "");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stdout).starts_with("--- A.scala\n"));
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(read(&dir, "A.scala"), UNFORMATTED);
+    // Writing, nothing shows; A.scala is written all the same.
+    let out = scuff_in(&dir, &["format", "-q", "."], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert_eq!(text(&out.stderr), "");
+    assert_eq!(read(&dir, "A.scala"), FORMATTED);
 }
 
 #[test]
@@ -149,11 +272,14 @@ fn several_files_report_in_order_and_errors_win() {
         "",
     );
     assert_eq!(out.status.code(), Some(2));
+    assert_eq!(reformatted(&out), ["a.scala", "c.scala"]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.ends_with("\n2 files would be reformatted\n"),
+        "{stdout}"
+    );
     let stderr = text(&out.stderr);
-    let lines: Vec<_> = stderr.lines().collect();
-    assert_eq!(lines.first(), Some(&"a.scala: would be reformatted"));
-    assert_eq!(lines.last(), Some(&"c.scala: would be reformatted"));
-    assert!(lines[1].starts_with("b.scala:2:"), "{stderr}");
+    assert!(stderr.starts_with("b.scala:2:"), "{stderr}");
 }
 
 #[test]
@@ -176,7 +302,10 @@ fn files_the_config_excludes_are_skipped() {
     std::fs::write(dir.join("B.scala"), UNFORMATTED).unwrap();
     let out = scuff_in(&dir, &["format", "--check", "gen/A.scala"], "");
     assert_eq!(out.status.code(), Some(0));
-    assert_eq!(text(&out.stderr), "");
+    assert_eq!(
+        text(&out.stderr),
+        "warning: no files to format under the given paths\n"
+    );
     let out = scuff_in(&dir, &["format", "gen/A.scala", "B.scala"], "");
     assert!(out.status.success());
     let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap();
@@ -197,7 +326,7 @@ fn max_column_comes_from_the_config() {
         "val x = f(\n  alpha,\n  beta,\n)\n"
     );
     // Standard input follows the config for the current directory.
-    let out = scuff_in(&dir, &["format"], "val x = f(alpha, beta)\n");
+    let out = scuff_in(&dir, &["format", "-"], "val x = f(alpha, beta)\n");
     assert_eq!(text(&out.stdout), "val x = f(\n  alpha,\n  beta,\n)\n");
 }
 
@@ -274,10 +403,7 @@ fn a_directory_stands_for_its_scala_files() {
     );
     let out = scuff_in(&dir, &["format", "--check", "."], "");
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        paths(text(&out.stderr)),
-        "./build.sbt: would be reformatted\n./src/main/scala/A.scala: would be reformatted\n"
-    );
+    assert_eq!(reformatted(&out), ["build.sbt", "src/main/scala/A.scala"]);
     let out = scuff_in(&dir, &["format", "src"], "");
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(read(&dir, "src/main/scala/A.scala"), FORMATTED);
@@ -301,10 +427,7 @@ fn a_walk_follows_the_config_and_skips_excluded_directories() {
         ],
     );
     let out = scuff_in(&dir, &["format", "--check", "."], "");
-    assert_eq!(
-        paths(text(&out.stderr)),
-        "./A.scala: would be reformatted\n./notes.txt: would be reformatted\n"
-    );
+    assert_eq!(reformatted(&out), ["A.scala", "notes.txt"]);
 }
 
 #[test]
@@ -315,10 +438,7 @@ fn a_file_named_twice_is_formatted_once() {
         &["format", "--check", "src", "src/A.scala", "./src"],
         "",
     );
-    assert_eq!(
-        paths(text(&out.stderr)),
-        "src/A.scala: would be reformatted\n"
-    );
+    assert_eq!(reformatted(&out), ["src/A.scala"]);
 }
 
 #[test]
@@ -345,10 +465,10 @@ fn a_file_and_a_link_to_it_are_formatted_once() {
     let dir = repository("linked", &[("src/A.scala", UNFORMATTED)]);
     std::os::unix::fs::symlink("src/A.scala", dir.join("B.scala")).unwrap();
     let out = scuff_in(&dir, &["format", "--check", "src/A.scala", "B.scala"], "");
-    assert_eq!(text(&out.stderr), "src/A.scala: would be reformatted\n");
+    assert_eq!(reformatted(&out), ["src/A.scala"]);
     // A walk doesn't follow links.
     let out = scuff_in(&dir, &["format", "--check", "."], "");
-    assert_eq!(text(&out.stderr), "./src/A.scala: would be reformatted\n");
+    assert_eq!(reformatted(&out), ["src/A.scala"]);
 }
 
 #[test]
@@ -369,7 +489,7 @@ fn imports_are_rewritten_to_what_the_dialect_allows() {
     assert_eq!(read(&dir, "A.scala"), "import a.*\nimport b.{ c as d }\n");
     assert_eq!(read(&dir, "build.sbt"), "import a._\n");
     // Standard input follows the dialect no pattern changes.
-    let out = scuff_in(&dir, &["format"], "import a._\n");
+    let out = scuff_in(&dir, &["format", "-"], "import a._\n");
     assert_eq!(text(&out.stdout), "import a.*\n");
 }
 
@@ -393,4 +513,23 @@ fn a_scala_2_dialect_keeps_imports() {
     let out = scuff_in(&dir, &["format", "A.scala"], "");
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(read(&dir, "A.scala"), "import a._\n");
+}
+
+#[test]
+fn color_is_on_only_when_asked_or_on_a_terminal() {
+    let dir = project("color");
+    std::fs::write(dir.join("A.scala"), UNFORMATTED).unwrap();
+    std::fs::write(dir.join("B.scala"), "object B {\n  def f( = 1\n").unwrap();
+    let has_color = |out: &Output| text(&out.stdout).contains('\x1b');
+    let out = scuff_in(&dir, &["format", "--check", "--color", "always", "."], "");
+    assert!(has_color(&out));
+    assert!(text(&out.stderr).contains('\x1b'));
+    // Piped, as here, it's off unless asked for.
+    let out = scuff_in(&dir, &["format", "--check", "."], "");
+    assert!(!has_color(&out));
+    let out = scuff_in(&dir, &["format", "--diff", "--color", "never", "."], "");
+    assert!(!has_color(&out));
+    // The formatted text from standard input is never colored.
+    let out = scuff_in(&dir, &["format", "--color", "always", "-"], UNFORMATTED);
+    assert_eq!(text(&out.stdout), FORMATTED);
 }

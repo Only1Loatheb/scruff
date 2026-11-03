@@ -6,11 +6,14 @@ description = "Scala code formatter"
 license = "MIT"
 
 [dependencies]
+anstream = "1.0"
+anstyle = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 hocon-parser = "1.14.2"
 ignore = "0.4"
 rayon = "1.12"
 regex = "1"
+similar = "2.7"
 text-size = "1.1.1"
 toml = { version = "1.1.8", default-features = false, features = ["parse", "serde"] }
 tree-sitter = "0.27.1"
