@@ -435,8 +435,7 @@ impl Config {
     /// when there's none, as for standard input.
     pub fn dialect_for(&self, file: Option<&Path>) -> Dialect {
         if let Some(file) = file {
-            let path = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
-            let path = path.to_string_lossy();
+            let path = match_text(file);
             if let Some((_, dialect)) = self
                 .dialect_overrides
                 .iter()
@@ -452,8 +451,7 @@ impl Config {
     /// `glob:.../X/**` exclude path matches it as `glob:.../X`, as scalafmt
     /// prunes its walks.
     pub fn excludes_dir(&self, dir: &Path) -> bool {
-        let path = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let path = path.to_string_lossy();
+        let path = match_text(dir);
         self.exclude_dirs.iter().any(|m| m.0.is_match(&path))
     }
 
@@ -467,8 +465,7 @@ impl Config {
     /// Whether the project formats `file`: an include pattern matches its
     /// absolute path, and no exclude pattern does.
     pub fn includes(&self, file: &Path) -> bool {
-        let path = std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf());
-        let path = path.to_string_lossy();
+        let path = match_text(file);
         self.include.iter().any(|m| m.0.is_match(&path))
             && !self.exclude.iter().any(|m| m.0.is_match(&path))
     }
@@ -508,6 +505,18 @@ impl Locator {
             self.found.insert(dir, result.clone());
         }
         result
+    }
+}
+
+/// The absolute path that patterns match against, with `/` separators on
+/// every platform, since patterns are written with `/`.
+fn match_text(path: &Path) -> String {
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let text = path.to_string_lossy();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.into_owned()
     }
 }
 
