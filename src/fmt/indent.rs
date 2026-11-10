@@ -940,6 +940,56 @@ mod tests {
     }
 
     #[test]
+    fn case_block_brace_after_block_argument() {
+        let source = "\
+def f = {
+  g {
+    foo
+      .bar()
+      .baz()
+  }.map {
+    case _ =>
+  }
+}
+";
+        let options = crate::fmt::FormatOptions {
+            max_width: 80,
+            dialect: crate::config::Dialect::named("scala213").unwrap(),
+        };
+        let formatted = crate::fmt::format(source, &options).unwrap();
+        assert_eq!(
+            formatted,
+            "\
+def f = {
+  g { foo.bar().baz() }.map {
+    case _ =>
+  }
+}
+"
+        );
+
+        let options_narrow = crate::fmt::FormatOptions {
+            max_width: 10,
+            dialect: crate::config::Dialect::named("scala213").unwrap(),
+        };
+        let formatted_narrow = crate::fmt::format(source, &options_narrow).unwrap();
+        assert_eq!(
+            formatted_narrow,
+            "\
+def f = {
+  g {
+    foo
+      .bar()
+      .baz()
+  }.map {
+    case _ =>
+  }
+}
+"
+        );
+    }
+
+    #[test]
     fn a_continuation_after_a_body_stays_outside_it() {
         // Moving the body to 4 would put `.map` inside it.
         let source = "object O:\n  val q = xs.filter: x =>\n      x > 1\n    .map: x =>\n      x\n";

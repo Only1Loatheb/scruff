@@ -298,7 +298,6 @@ fn relaid(tree: &Tree, rules: Rules, style: Style, broken_chains: bool) -> inden
             relaid
                 .joined
                 .extend(first_code_token(body).and_then(line_first));
-            relaid.joined.extend(line_first(parts.close));
         }
     }
     relaid.joined.sort();
